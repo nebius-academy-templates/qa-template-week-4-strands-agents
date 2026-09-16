@@ -4,12 +4,29 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agents import make_model
+from agents import make_agents, make_model
+
+
+def test_make_agents_rejects_readiness_instructions_outside_agent_docs(tmp_path):
+    (tmp_path / "AGENTS.md").write_text("# Repository rules\n", encoding="utf-8")
+    policy = tmp_path / "agent_docs/AI_POLICY.md"
+    policy.parent.mkdir(parents=True)
+    policy.write_text("# AI policy\n", encoding="utf-8")
+    misplaced = tmp_path / "task-automation-readiness-instructions.md"
+    misplaced.parent.mkdir(parents=True, exist_ok=True)
+    misplaced.write_text("# Misplaced readiness instructions\n", encoding="utf-8")
+
+    with pytest.raises(
+        FileNotFoundError,
+        match="agent_docs/task-automation-readiness-instructions.md is required",
+    ):
+        make_agents(SimpleNamespace(root=tmp_path), lambda: pytest.fail("model was constructed"))
 
 
 def test_anthropic_model_enables_ephemeral_prompt_and_tool_cache(monkeypatch):

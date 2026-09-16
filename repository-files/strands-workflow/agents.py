@@ -180,15 +180,9 @@ The host writes the stage reports from your structured result.
             tool_executor=SequentialToolExecutor(),
         )
 
-    readiness_paths = (
-        "agent_docs/task-automation-readiness-instructions.md",
-        "task-automation-readiness-instructions.md",
-    )
-    readiness_path = next(
-        (path for path in readiness_paths if (repository.root / path).is_file()), None
-    )
-    if readiness_path is None:
-        raise FileNotFoundError("task-automation-readiness-instructions.md is required")
+    readiness_path = "agent_docs/task-automation-readiness-instructions.md"
+    if not (repository.root / readiness_path).is_file():
+        raise FileNotFoundError(f"{readiness_path} is required")
     case_check = _section(
         document(".agents/skills/automate-test-case/SKILL.md"),
         "4. Check the test against the test case",
