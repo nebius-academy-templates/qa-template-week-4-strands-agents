@@ -187,7 +187,6 @@ The host writes the stage reports from your structured result.
         document(".agents/skills/automate-test-case/SKILL.md"),
         "4. Check the test against the test case",
     )
-
     return {
         "readiness": agent(
             "readiness",
@@ -204,21 +203,23 @@ that saved result replaces the procedure's task-automation-readiness.md output.
         ),
         "generation": agent(
             "generation",
-            """Activate gen-api-test with the skills tool before starting. Follow its
-complete coverage preflight, plan, implementation and verification procedure.
-Read referenced documents through repository tools. Keep the API as a black box.
-Use search_text for the repository inventory. run_api_tests runs the fresh full
-API suite and checks the supplied case's exact package.Class.method. Inspect the
-returned JUnit and Allure evidence, including request/response attachments.
+            f"""Activate gen-api-test with the skills tool and follow its complete procedure.
+Read referenced documents through repository tools and use search_text for the
+coverage inventory. Use run_api_tests for verification: status describes the
+full-suite result, while target_status describes the supplied case's exact method.
+In this host, the skill's plan template is
+`agent_docs/templates/automation_plan.api.workflow.md.template`, and its
+`automation_plan.md` working artifact is
+`agent_docs/automation-plans/{repository.case_id}.md`.
 If existing coverage proves every behavior in the supplied case, return
 ALREADY_COVERED with the exact existing target and coverage evidence; do not
 generate a duplicate or claim a fresh pass. If the case's Allure ID is occupied
 without equivalent behavior, return BLOCKED with the conflicting target and the
-unmet case behavior; do not rename the case or claim coverage. After a failed
-run, preserve evidence and return
-FAILED when the selected test failed, otherwise NOT_VERIFIED. Do not start repair
-here. Return VERIFIED only when current execution_evidence proves the required
-full suite and selected target passed after the final change. Include the exact
+unmet case behavior; do not rename the case or claim coverage. After
+run_api_tests, return FAILED only when target_status is FAILED. Return
+NOT_VERIFIED when the full-suite status is not VERIFIED for another reason. Do
+not start repair here. Return VERIFIED only when current execution_evidence has
+both status and target_status VERIFIED after the final change. Include the exact
 target and concise plan, changes, result and evidence paths in Implementation.
 """,
             [*inspection, write_file, edit_file, run_api_tests],

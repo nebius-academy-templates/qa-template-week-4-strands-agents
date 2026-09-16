@@ -33,7 +33,7 @@ configuration.
 | `metrics.py` | Selects safe numeric aggregates for local stage reports. |
 | `safety.py` | Limits model calls independently of observability. |
 | `telemetry.py` | Validates redaction and enables optional native Strands OTLP traces. |
-| `main.py` | Loads one complete API case and runs the graph. |
+| `main.py` | Loads one or more complete API cases and runs one graph per case in order. |
 
 The distributed graph intentionally leaves the supplied `review` agent
 disconnected. This is the bounded code change in the first practice. The
@@ -49,7 +49,7 @@ practices.
 | Building the Workflow Graph | Read the supplied dependencies and conditions in the starter `workflow.py`. |
 | Observing Runs and Reusing Prompt Context | Inspect aggregate stage metrics in `result.json`, native Strands tracing setup in `telemetry.py`, and Anthropic cache configuration in `agents.py`. |
 | Practice: Add the Review Route | Connect the supplied review agent and require current verified evidence. |
-| Capstone: Run an Evidence-Backed Workflow | Run the completed graph on the assigned API case and inspect its saved evidence. |
+| Capstone: Run an Evidence-Backed Workflow | Run the completed graph on the assigned API cases and inspect their saved evidence. |
 
 ## Offline verification
 

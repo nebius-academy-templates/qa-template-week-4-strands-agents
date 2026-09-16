@@ -14,6 +14,8 @@ from repository import Repository
 from telemetry import NativeTelemetry
 from workflow import run_workflow
 
+SUCCESS_STATUSES = frozenset({"REVIEWED", "ALREADY_COVERED"})
+
 
 def read_case(path: Path, case_id: str) -> str:
     if path.suffix.lower() != ".xlsx":
@@ -42,39 +44,104 @@ def read_case(path: Path, case_id: str) -> str:
     return "\n\n".join(sections)
 
 
-def main() -> int:
+def validate_case_selection(case_ids: list[str], case_path: Path) -> None:
+    """Require explicit, ordered and unambiguous case selection."""
+    if not case_ids or any(not re.fullmatch(r"API-[0-9]+", case_id) for case_id in case_ids):
+        raise ValueError("--case-id must identify API cases, for example API-2007")
+    if len(case_ids) != len(set(case_ids)):
+        raise ValueError("--case-id values must be unique")
+    if len(case_ids) > 1 and case_path.suffix.lower() != ".xlsx":
+        raise ValueError("Multiple case IDs require an XLSX workbook")
+
+
+def run_cases(
+    repository: Path,
+    case_path: Path,
+    case_ids: list[str],
+    provider: str,
+    model: str,
+    api_url: str,
+    export_otel: bool = False,
+) -> tuple[dict, Path]:
+    """Run isolated single-case graphs in the requested order."""
+    validate_case_selection(case_ids, case_path)
+    # Validate every selection before the first graph can change repository files.
+    cases = [(case_id, read_case(case_path, case_id)) for case_id in case_ids]
+    output_dir = repository / ".agent-state" / "qa-workflow" / uuid4().hex
+    output_dir.mkdir(parents=True)
+    case_results = []
+    stopped = False
+    telemetry = NativeTelemetry(export=export_otel)
+    try:
+        for index, (case_id, case) in enumerate(cases, 1):
+            case_output = output_dir / "cases" / f"{index:03d}-{case_id}"
+            adapter = Repository(repository, case_output, case_id, api_url)
+            agents = make_agents(adapter, lambda: make_model(provider, model))
+            result = run_workflow(case, adapter, agents)
+            case_results.append(
+                {
+                    "case_id": case_id,
+                    "status": result["status"],
+                    "report": (case_output / "result.json").relative_to(output_dir).as_posix(),
+                    "changed_files": result.get("changed_files", []),
+                }
+            )
+            if result["status"] not in SUCCESS_STATUSES:
+                stopped = True
+                break
+    finally:
+        telemetry.close()
+
+    processed = [result["case_id"] for result in case_results]
+    complete = not stopped and len(processed) == len(case_ids)
+    report = {
+        "batch_status": "COMPLETED" if complete else "STOPPED",
+        "requested_case_ids": case_ids,
+        "processed_case_ids": processed,
+        "remaining_case_ids": case_ids[len(processed) :],
+        "stopped_after": None if complete else processed[-1],
+        "cases": case_results,
+    }
+    report_path = output_dir / "result.json"
+    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    return report, report_path
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--case-file", type=Path, required=True)
-    parser.add_argument("--case-id", required=True)
+    parser.add_argument("--case-id", nargs="+", required=True, metavar="API-NNNN")
     parser.add_argument("--provider", choices=("anthropic", "openai"), required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--api-url", default="http://127.0.0.1:8080")
     parser.add_argument(
         "--otel", action="store_true", help="Export traces using OTEL_* environment settings"
     )
-    args = parser.parse_args()
-    if not re.fullmatch(r"API-[0-9]+", args.case_id):
-        parser.error("--case-id must identify one API case, for example API-1234")
+    args = parser.parse_args(argv)
 
     repository = args.repo.resolve(strict=True)
     case_path = args.case_file.resolve(strict=True)
-    case = read_case(case_path, args.case_id)
-    output_dir = repository / ".agent-state" / "qa-workflow" / uuid4().hex
-    output_dir.mkdir(parents=True)
-    adapter = Repository(repository, output_dir, args.case_id, args.api_url)
-    telemetry = NativeTelemetry(export=args.otel)
     try:
-        agents = make_agents(adapter, lambda: make_model(args.provider, args.model))
-        result = run_workflow(case, adapter, agents)
-        print(
-            json.dumps(
-                {"status": result["status"], "report": str(output_dir / "result.json")}, indent=2
-            )
+        validate_case_selection(args.case_id, case_path)
+    except ValueError as error:
+        parser.error(str(error))
+    result, report_path = run_cases(
+        repository,
+        case_path,
+        args.case_id,
+        args.provider,
+        args.model,
+        args.api_url,
+        args.otel,
+    )
+    print(
+        json.dumps(
+            {"status": result["batch_status"], "report": str(report_path)},
+            indent=2,
         )
-        return 0 if result["status"] in {"REVIEWED", "ALREADY_COVERED"} else 1
-    finally:
-        telemetry.close()
+    )
+    return 0 if result["batch_status"] == "COMPLETED" else 1
 
 
 if __name__ == "__main__":

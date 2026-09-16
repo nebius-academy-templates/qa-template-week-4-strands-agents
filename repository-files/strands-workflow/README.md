@@ -1,9 +1,10 @@
 # Evidence-backed API workflow with Strands
 
-This starter coordinates one complete API case through source assessment,
-generation and fresh execution, conditional repair, and a read-only check
-against the original case. It uses the documents, skills, hook, Kotlin suite,
-and case workbook already installed in the practice repository.
+This starter coordinates one or more complete API cases through source
+assessment, generation and fresh execution, conditional repair, and a read-only
+check against each original case. Cases run in the supplied order, with a fresh
+graph and repository adapter for each case. It uses the documents, skills, hook,
+Kotlin suite, and case workbook already installed in the practice repository.
 
 The starter supplies all four agents and the deterministic repository adapter.
 Its graph connects readiness, generation, and conditional repair. The review
@@ -87,15 +88,20 @@ or repair, the host attaches the selected `Class.method`, changed files, current
 diff, command log, JUnit counts, and Allure attachment evidence. Any source
 change makes earlier execution evidence stale.
 
-Each invocation writes to `.agent-state/qa-workflow/<run-id>/` in the practice
-repository. `result.json` records the domain status, executed stages, their
-domain results, and safe aggregate metrics. Each stage also has a JSON report
-containing its domain result plus duration, cycle count, model latency, token counts, cache
-counts when the provider reports them, and per-tool name, count, success, error,
-and total-time values. These metrics are selected directly from the Strands
-result; raw metric summaries, messages, tool arguments, and tool results are not
-serialized. The metrics are not added to the next agent's input. A graph status
-of `completed` means only that graph execution stopped normally.
+Each invocation writes a batch report to
+`.agent-state/qa-workflow/<run-id>/result.json`. Per-case stage reports and
+results are stored under `cases/001-<case-id>/`, `cases/002-<case-id>/`, and so
+on. A case runs only after the preceding case finishes with `REVIEWED` or
+`ALREADY_COVERED`; any other status stops the batch before the next case can
+modify the same checkout. Each case keeps a separate plan at
+`agent_docs/automation-plans/<case-id>.md`, so processing a later case does not
+replace an earlier case's plan. Each stage report contains its domain result plus
+duration, cycle count, model latency, token counts, cache counts when the
+provider reports them, and per-tool name, count, success, error, and total-time
+values. These metrics are selected directly from the Strands result; raw metric
+summaries, messages, tool arguments, and tool results are not serialized. The
+metrics are not added to the next agent's input. A graph status of `completed`
+means only that graph execution stopped normally.
 
 The application does not commit, push, update tickets, or change the product.
 It has no checkpoint or restart protocol. After an interrupted process, inspect
@@ -161,21 +167,24 @@ stale-evidence blocking. Run the foundation checks again after it passes.
 
 ## Capstone: Run an Evidence-Backed Workflow
 
-Use the completed graph with the assigned complete API case. Start the backend,
-set the provider key, and run from `strands-workflow/`. This example uses a
-workbook case ID; replace the ID and model with the assigned values.
+Use the completed graph with one or more assigned complete API cases. Start the
+backend, set the provider key, and run from `strands-workflow/`. Supply case IDs
+in their required execution order. This example uses two workbook cases;
+replace the IDs and model with the assigned values. A plain-text case file can
+be used only when one case ID is supplied.
 
 ```powershell
 .\.venv\Scripts\python.exe main.py `
   --repo .. `
   --case-file ..\test-cases\test-cases.xlsx `
-  --case-id YOUR_CASE_ID `
+  --case-id FIRST_CASE_ID SECOND_CASE_ID `
   --provider anthropic `
   --model YOUR_MODEL_ID
 ```
 
 On macOS or Linux, use `./.venv/bin/python`, forward slashes, and shell line
-continuations. Inspect `result.json`, the executed stage files, and matching
-JUnit and Allure artifacts. If native OTLP tracing was enabled, use the trace
-backend for detailed chronology. Report source-only coverage, verified
-execution, repair outcomes, and review findings as distinct results.
+continuations. Inspect the batch `result.json`, each per-case result and stage
+file, and matching JUnit and Allure artifacts. If native OTLP tracing was
+enabled, use the trace backend for detailed chronology. Report source-only
+coverage, verified execution, repair outcomes, and review findings as distinct
+results.

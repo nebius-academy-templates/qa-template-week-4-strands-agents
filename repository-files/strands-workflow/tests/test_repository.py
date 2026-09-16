@@ -161,6 +161,20 @@ class RepositoryTests(unittest.TestCase):
             with self.subTest(path=path), self.assertRaises(ValueError):
                 self.repo.write_file(path, "API-9001 replacement")
 
+    def test_sequential_cases_keep_separate_plans(self):
+        first_path = "agent_docs/automation-plans/API-9001.md"
+        second_path = "agent_docs/automation-plans/API-9002.md"
+        self.repo.write_file(first_path, "API-9001 validated plan")
+        second = Repository(
+            self.root,
+            self.root / ".agent-state/qa-workflow/test/cases/002-API-9002",
+            "API-9002",
+        )
+        second.write_file(second_path, "API-9002 validated plan")
+
+        self.assertEqual((self.root / first_path).read_text(), "API-9001 validated plan\n")
+        self.assertEqual((self.root / second_path).read_text(), "API-9002 validated plan\n")
+
     def test_pre_denial_prevents_gradle_and_leaves_old_reports(self):
         self.evidence()
         denial = {
