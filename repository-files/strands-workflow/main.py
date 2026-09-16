@@ -9,39 +9,12 @@ from pathlib import Path
 from uuid import uuid4
 
 from agents import make_agents, make_model
-from openpyxl import load_workbook
+from case_loader import SUPPORTED_SUFFIXES, TEXT_SUFFIXES, read_cases
 from repository import Repository
 from telemetry import NativeTelemetry
 from workflow import run_workflow
 
 SUCCESS_STATUSES = frozenset({"REVIEWED", "ALREADY_COVERED"})
-
-
-def read_case(path: Path, case_id: str) -> str:
-    if path.suffix.lower() != ".xlsx":
-        text = path.read_text(encoding="utf-8-sig")
-        if not text.strip():
-            raise ValueError("The supplied case file is empty")
-        return text
-    workbook = load_workbook(path, read_only=True, data_only=True)
-    sections = []
-    try:
-        for sheet in workbook:
-            rows = list(sheet.iter_rows(values_only=True))
-            selected = [row for row in rows if any(str(value).strip() == case_id for value in row)]
-            if selected:
-                headers = next((row for row in rows if any(value is not None for value in row)), ())
-                sections.append(
-                    f"## {sheet.title}\n"
-                    + json.dumps(
-                        {"headers": headers, "rows": selected}, ensure_ascii=False, default=str
-                    )
-                )
-    finally:
-        workbook.close()
-    if not sections:
-        raise ValueError(f"No rows explicitly identify {case_id}; supply its complete text instead")
-    return "\n\n".join(sections)
 
 
 def validate_case_selection(case_ids: list[str], case_path: Path) -> None:
@@ -50,8 +23,11 @@ def validate_case_selection(case_ids: list[str], case_path: Path) -> None:
         raise ValueError("--case-id must identify API cases, for example API-2007")
     if len(case_ids) != len(set(case_ids)):
         raise ValueError("--case-id values must be unique")
-    if len(case_ids) > 1 and case_path.suffix.lower() != ".xlsx":
-        raise ValueError("Multiple case IDs require an XLSX workbook")
+    suffix = case_path.suffix.lower()
+    if suffix not in SUPPORTED_SUFFIXES:
+        raise ValueError("--case-file must be an XLSX workbook, Markdown file, or text file")
+    if suffix in TEXT_SUFFIXES and len(case_ids) != 1:
+        raise ValueError("A Markdown or text case file requires exactly one case ID")
 
 
 def run_cases(
@@ -66,7 +42,7 @@ def run_cases(
     """Run isolated single-case graphs in the requested order."""
     validate_case_selection(case_ids, case_path)
     # Validate every selection before the first graph can change repository files.
-    cases = [(case_id, read_case(case_path, case_id)) for case_id in case_ids]
+    cases = read_cases(case_path, case_ids)
     output_dir = repository / ".agent-state" / "qa-workflow" / uuid4().hex
     output_dir.mkdir(parents=True)
     case_results = []

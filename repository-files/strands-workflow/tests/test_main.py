@@ -12,20 +12,36 @@ from openpyxl import Workbook
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import case_loader
 import main as entry
 
 
 def write_workbook(path: Path, *case_ids: str) -> None:
     workbook = Workbook()
-    cases = workbook.active
-    cases.title = "Cases"
-    cases.append(["Case ID", "Action", "Expected result"])
+    summary = workbook.active
+    summary.title = "Case Summary"
+    summary.append(["Course cases"])
+    summary.append(["Case ID", "Title", "Description", "Preconditions"])
     for case_id in case_ids:
-        cases.append([case_id, f"Call for {case_id}", f"Response for {case_id}"])
-    details = workbook.create_sheet("Details")
-    details.append(["Case ID", "Requirement"])
+        summary.append(
+            [
+                case_id,
+                f"Title for {case_id}",
+                f"Description for {case_id}",
+                f"Preconditions for {case_id}",
+            ]
+        )
+    steps = workbook.create_sheet("Steps")
+    steps.append(["Execution steps"])
+    steps.append(["Case ID", "Actions", "Expected Results"])
     for case_id in case_ids:
-        details.append([case_id, f"Detail for {case_id}"])
+        steps.append(
+            [
+                case_id,
+                f"1. First action for {case_id}\n2. Second action for {case_id}",
+                f"1. First result for {case_id}\n2. Second result for {case_id}",
+            ]
+        )
     workbook.save(path)
 
 
@@ -83,18 +99,61 @@ def install_runtime_stubs(monkeypatch, statuses: dict[str, str]):
     return adapters, agent_sets, calls, models, telemetry
 
 
-def test_read_case_extracts_only_the_selected_workbook_rows(tmp_path):
+def test_read_cases_opens_workbook_once_and_preserves_order(tmp_path, monkeypatch):
     workbook = tmp_path / "cases.xlsx"
     write_workbook(workbook, "API-1001", "API-1002")
+    real_load_workbook = case_loader.load_workbook
+    opened = []
 
-    first = entry.read_case(workbook, "API-1001")
-    second = entry.read_case(workbook, "API-1002")
+    def tracked_load_workbook(*args, **kwargs):
+        opened.append(args[0])
+        return real_load_workbook(*args, **kwargs)
 
-    assert "Call for API-1001" in first
-    assert "Detail for API-1001" in first
-    assert "API-1002" not in first
-    assert "Call for API-1002" in second
-    assert "API-1001" not in second
+    monkeypatch.setattr(case_loader, "load_workbook", tracked_load_workbook)
+
+    cases = entry.read_cases(workbook, ["API-1002", "API-1001"])
+    second, first = cases
+
+    assert opened == [workbook]
+    assert [case_id for case_id, _ in cases] == ["API-1002", "API-1001"]
+    assert "Title for API-1001" in first[1]
+    assert "First action for API-1001" in first[1]
+    assert "Second action for API-1001" in first[1]
+    assert "API-1002" not in first[1]
+    assert "Title for API-1002" in second[1]
+    assert "API-1001" not in second[1]
+
+
+def test_read_cases_requires_named_sheets_and_one_row_per_case(tmp_path):
+    duplicate = tmp_path / "duplicate.xlsx"
+    write_workbook(duplicate, "API-1001")
+    source = case_loader.load_workbook(duplicate)
+    source["Steps"].append(["API-1001", "Duplicate", "Duplicate"])
+    source.save(duplicate)
+    source.close()
+
+    with pytest.raises(ValueError, match="Steps.*exactly one row.*found 2"):
+        entry.read_cases(duplicate, ["API-1001"])
+
+    missing_sheet = tmp_path / "missing-sheet.xlsx"
+    write_workbook(missing_sheet, "API-1001")
+    source = case_loader.load_workbook(missing_sheet)
+    source.remove(source["Steps"])
+    source.save(missing_sheet)
+    source.close()
+
+    with pytest.raises(ValueError, match="missing required worksheet.*Steps"):
+        entry.read_cases(missing_sheet, ["API-1001"])
+
+    missing_column = tmp_path / "missing-column.xlsx"
+    write_workbook(missing_column, "API-1001")
+    source = case_loader.load_workbook(missing_column)
+    source["Steps"].delete_cols(3)
+    source.save(missing_column)
+    source.close()
+
+    with pytest.raises(ValueError, match="missing required column.*Expected Results"):
+        entry.read_cases(missing_column, ["API-1001"])
 
 
 def test_case_selection_rejects_duplicates_and_ambiguous_text_batch(tmp_path):
@@ -102,13 +161,28 @@ def test_case_selection_rejects_duplicates_and_ambiguous_text_batch(tmp_path):
     text = tmp_path / "case.md"
     write_workbook(workbook, "API-1001")
     text.write_text("Complete API-1001 case", encoding="utf-8")
+    unsupported = tmp_path / "case.json"
 
     with pytest.raises(ValueError, match="unique"):
         entry.validate_case_selection(["API-1001", "API-1001"], workbook)
-    with pytest.raises(ValueError, match="XLSX"):
+    with pytest.raises(ValueError, match="exactly one"):
         entry.validate_case_selection(["API-1001", "API-1002"], text)
+    with pytest.raises(ValueError, match="XLSX workbook"):
+        entry.validate_case_selection(["API-1001"], unsupported)
 
     entry.validate_case_selection(["API-1001"], text)
+
+
+def test_text_case_must_explicitly_identify_the_selected_id(tmp_path):
+    case_file = tmp_path / "case.txt"
+    case_file.write_text("Complete API-1002 case", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="API-1001"):
+        entry.read_cases(case_file, ["API-1001"])
+
+    case_file.write_text(" \n", encoding="utf-8")
+    with pytest.raises(ValueError, match="empty"):
+        entry.read_cases(case_file, ["API-1001"])
 
 
 def test_main_accepts_one_or_more_case_ids_in_cli_order(tmp_path, monkeypatch):
@@ -253,7 +327,9 @@ def test_all_workbook_cases_are_validated_before_agents_are_constructed(tmp_path
     workbook = tmp_path / "cases.xlsx"
     write_workbook(workbook, "API-1001")
     constructed = []
+    telemetry = []
     monkeypatch.setattr(entry, "make_agents", lambda *args: constructed.append(args))
+    monkeypatch.setattr(entry, "NativeTelemetry", lambda *args, **kwargs: telemetry.append(args))
 
     with pytest.raises(ValueError, match="API-1002"):
         entry.run_cases(
@@ -266,4 +342,5 @@ def test_all_workbook_cases_are_validated_before_agents_are_constructed(tmp_path
         )
 
     assert constructed == []
+    assert telemetry == []
     assert not (repository / ".agent-state").exists()

@@ -170,8 +170,11 @@ stale-evidence blocking. Run the foundation checks again after it passes.
 Use the completed graph with one or more assigned complete API cases. Start the
 backend, set the provider key, and run from `strands-workflow/`. Supply case IDs
 in their required execution order. This example uses two workbook cases;
-replace the IDs and model with the assigned values. A plain-text case file can
-be used only when one case ID is supplied.
+replace the IDs and model with the assigned values. A `.md` or `.txt` case file
+can be used only when one case ID is supplied, and its content must explicitly
+include that ID. The workbook must contain the `Case Summary` and `Steps`
+worksheets with their standard columns: `Case ID`, `Title`, `Description`,
+`Preconditions`, `Actions`, and `Expected Results`.
 
 ```powershell
 .\.venv\Scripts\python.exe main.py `
