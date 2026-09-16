@@ -45,7 +45,7 @@ def write_workbook(path: Path, *case_ids: str) -> None:
     workbook.save(path)
 
 
-def install_runtime_stubs(monkeypatch, statuses: dict[str, str]):
+def install_runtime_stubs(monkeypatch, outcomes: dict[str, str | dict]):
     adapters = []
     agent_sets = []
     calls = []
@@ -81,11 +81,29 @@ def install_runtime_stubs(monkeypatch, statuses: dict[str, str]):
 
     def run_workflow(case, repository, agents):
         calls.append((repository.case_id, case, repository, agents))
-        result = {
-            "case_id": repository.case_id,
-            "status": statuses[repository.case_id],
-            "changed_files": [f"generated/{repository.case_id}.kt"],
-        }
+        outcome = outcomes[repository.case_id]
+        if isinstance(outcome, dict):
+            result = {"case_id": repository.case_id, **outcome}
+        else:
+            result = {
+                "case_id": repository.case_id,
+                "status": outcome,
+                "changed_files": [f"generated/{repository.case_id}.kt"],
+            }
+            if outcome == "ALREADY_COVERED":
+                target = f"tests.Existing{repository.case_id.removeprefix('API-')}Test.testCase"
+                result.update(
+                    {
+                        "changed_files": [],
+                        "evidence": {
+                            "target": target,
+                            "full_suite": True,
+                            "status": "VERIFIED",
+                            "target_status": "VERIFIED",
+                        },
+                        "stages": {"generation": {"target": target}},
+                    }
+                )
         repository.output_dir.mkdir(parents=True)
         (repository.output_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
         return result
@@ -290,6 +308,74 @@ def test_batch_runs_cases_in_order_with_fresh_state_and_separate_reports(tmp_pat
     assert report["cases"][0]["changed_files"] == ["generated/API-1001.kt"]
     assert json.loads(report_path.read_text(encoding="utf-8")) == report
     assert telemetry[0].export is True
+    assert telemetry[0].closed is True
+
+
+def test_already_covered_requires_unchanged_source_and_matching_full_suite_evidence():
+    target = "tests.ExistingApiTest.testCase"
+    result = {
+        "status": "ALREADY_COVERED",
+        "changed_files": [],
+        "evidence": {
+            "target": target,
+            "full_suite": True,
+            "status": "VERIFIED",
+            "target_status": "VERIFIED",
+        },
+        "stages": {"generation": {"target": target}},
+    }
+
+    assert entry.case_succeeded(result) is True
+    assert (
+        entry.case_succeeded(
+            {key: value for key, value in result.items() if key != "changed_files"}
+        )
+        is False
+    )
+    assert entry.case_succeeded({**result, "changed_files": ["ExistingApiTest.kt"]}) is False
+    assert (
+        entry.case_succeeded(
+            {
+                **result,
+                "evidence": {**result["evidence"], "target": "tests.OtherTest.testCase"},
+            }
+        )
+        is False
+    )
+    assert (
+        entry.case_succeeded({**result, "evidence": {**result["evidence"], "full_suite": False}})
+        is False
+    )
+
+
+def test_batch_stops_on_bare_already_covered(tmp_path, monkeypatch):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    workbook = tmp_path / "cases.xlsx"
+    write_workbook(workbook, "API-1001", "API-1002")
+    adapters, agent_sets, calls, models, telemetry = install_runtime_stubs(
+        monkeypatch,
+        {
+            "API-1001": {"status": "ALREADY_COVERED", "changed_files": []},
+            "API-1002": "REVIEWED",
+        },
+    )
+
+    report, _ = entry.run_cases(
+        repository,
+        workbook,
+        ["API-1001", "API-1002"],
+        "openai",
+        "test-model",
+        "http://127.0.0.1:8080",
+    )
+
+    assert [case_id for case_id, *_ in calls] == ["API-1001"]
+    assert len(adapters) == len(agent_sets) == len(models) == 1
+    assert report["batch_status"] == "STOPPED"
+    assert report["processed_case_ids"] == ["API-1001"]
+    assert report["remaining_case_ids"] == ["API-1002"]
+    assert report["stopped_after"] == "API-1001"
     assert telemetry[0].closed is True
 
 

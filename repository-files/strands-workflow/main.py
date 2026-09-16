@@ -12,9 +12,19 @@ from agents import make_agents, make_model
 from case_loader import SUPPORTED_SUFFIXES, TEXT_SUFFIXES, read_cases
 from repository import Repository
 from telemetry import NativeTelemetry
-from workflow import run_workflow
+from workflow import run_workflow, verified_full_suite
 
-SUCCESS_STATUSES = frozenset({"REVIEWED", "ALREADY_COVERED"})
+
+def case_succeeded(result: dict) -> bool:
+    """Accept deduplicated coverage only with matching full-suite proof."""
+    if result.get("status") == "REVIEWED":
+        return True
+    generation = result.get("stages", {}).get("generation", {})
+    return (
+        result.get("status") == "ALREADY_COVERED"
+        and result.get("changed_files") == []
+        and verified_full_suite(result.get("evidence", {}), generation.get("target", ""))
+    )
 
 
 def validate_case_selection(case_ids: list[str], case_path: Path) -> None:
@@ -62,7 +72,7 @@ def run_cases(
                     "changed_files": result.get("changed_files", []),
                 }
             )
-            if result["status"] not in SUCCESS_STATUSES:
+            if not case_succeeded(result):
                 stopped = True
                 break
     finally:

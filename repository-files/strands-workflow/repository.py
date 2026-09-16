@@ -12,6 +12,7 @@ import subprocess
 import sys
 import uuid
 import xml.etree.ElementTree as ET
+from contextlib import suppress
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
@@ -362,10 +363,8 @@ class Repository:
             "output": result.stdout,
             "log": log.relative_to(self.root).as_posix(),
         }
-        try:
+        with suppress(ValueError):
             response["data"] = json.loads(result.stdout)
-        except ValueError:
-            pass
         return response
 
     def _inventory(self) -> list[dict]:
@@ -378,7 +377,8 @@ class Repository:
                 raise ValueError(f"Cannot identify test class: {file.name}")
             found = []
             for match in re.finditer(
-                r"(?P<annotations>(?:^[ \t]*@\w+(?:\([^\n]*\))?[ \t]*\r?\n)+)[ \t]*fun\s+(?P<method>\w+)\s*\(",
+                r"(?P<annotations>(?:^[ \t]*@\w+(?:\([^\n]*\))?[ \t]*\r?\n)+)"
+                r"[ \t]*fun\s+(?P<method>\w+)\s*\(",
                 text,
                 re.MULTILINE,
             ):
@@ -407,7 +407,14 @@ class Repository:
             return "failed"
         return "skipped" if case.find("skipped") is not None else "passed"
 
-    def _evidence(self, folder: Path, expected: list[dict], target: str, exit_code: int) -> dict:
+    def _evidence(
+        self,
+        folder: Path,
+        expected: list[dict],
+        target: str,
+        exit_code: int,
+        full_suite: bool,
+    ) -> dict:
         cases = [
             case
             for file in (folder / "junit").glob("*.xml")
@@ -440,7 +447,10 @@ class Repository:
         for case in cases:
             counts[self._junit_status(case)] += 1
         reasons = []
-        if not expected or len(cases) != len(expected) or len(allure) != len(expected):
+        inventory_mismatch = (
+            not expected or len(cases) != len(expected) or len(allure) != len(expected)
+        )
+        if inventory_mismatch:
             reasons.append("JUnit/Allure counts do not match the selected source tests")
         for item in expected:
             reports = allure_for(item["target"])
@@ -504,6 +514,36 @@ class Repository:
         failed = counts["failed"] > 0 or any(
             item.get("status") in {"failed", "broken"} for item in allure
         )
+
+        non_target_status = None
+        if full_suite:
+            non_target_results = []
+            for item in expected:
+                if item["target"] == target:
+                    continue
+                item_junit = junit_for(item)
+                item_allure = allure_for(item["target"])
+                item_failed = any(
+                    self._junit_status(case) == "failed" for case in item_junit
+                ) or any(report.get("status") in {"failed", "broken"} for report in item_allure)
+                item_verified = (
+                    len(item_junit) == 1
+                    and self._junit_status(item_junit[0]) == "passed"
+                    and len(item_allure) == 1
+                    and item_allure[0].get("status") == "passed"
+                )
+                if item_failed:
+                    non_target_results.append("FAILED")
+                elif item_verified:
+                    non_target_results.append("VERIFIED")
+                else:
+                    non_target_results.append("NOT_VERIFIED")
+            if "FAILED" in non_target_results:
+                non_target_status = "FAILED"
+            elif inventory_mismatch or "NOT_VERIFIED" in non_target_results:
+                non_target_status = "NOT_VERIFIED"
+            else:
+                non_target_status = "VERIFIED"
         return {
             "status": "FAILED" if failed else "NOT_VERIFIED" if reasons else "VERIFIED",
             "target_status": "FAILED"
@@ -511,6 +551,7 @@ class Repository:
             else "VERIFIED"
             if target_passed
             else "NOT_VERIFIED",
+            "non_target_status": non_target_status,
             "counts": counts,
             "reasons": reasons,
         }
@@ -585,6 +626,7 @@ class Repository:
             "target": target,
             "case_id": self.case_id,
             "full_suite": full_suite,
+            "non_target_status": None,
             "command": command_text,
             "log": relative("suite.log"),
             "junit_dir": relative("junit"),
@@ -636,7 +678,7 @@ class Repository:
                             copy = destination / file.relative_to(source)
                             copy.parent.mkdir(parents=True, exist_ok=True)
                             shutil.copy2(file, copy)
-                summary.update(self._evidence(folder, expected, target, run.returncode))
+                summary.update(self._evidence(folder, expected, target, run.returncode, full_suite))
                 if before != self._source_digest():
                     invalidate("Sources changed during execution")
         except (OSError, ValueError, RuntimeError, ET.ParseError) as error:

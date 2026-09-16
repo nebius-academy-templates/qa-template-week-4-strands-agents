@@ -78,8 +78,10 @@ of a successful run. The host application supplies those operations separately.
 Every role also receives the complete original case, `AGENTS.md`, and
 `agent_docs/AI_POLICY.md`. A generated status cannot replace the host's JUnit
 and Allure validation. Equivalent source coverage is reported as
-`ALREADY_COVERED`; an occupied Allure ID without equivalent behavior is
-reported as `BLOCKED`.
+`ALREADY_COVERED` only when a matching full-suite run verifies the exact
+existing target and no source changed. A bare source-level coverage claim,
+exact-target-only run, or evidence for another target is `NOT_VERIFIED`. An
+occupied Allure ID without equivalent behavior is reported as `BLOCKED`.
 
 ## State, evidence, and reports
 
@@ -88,12 +90,20 @@ or repair, the host attaches the selected `Class.method`, changed files, current
 diff, command log, JUnit counts, and Allure attachment evidence. Any source
 change makes earlier execution evidence stale.
 
+Repair reruns only the exact failed target; it does not repeat the full suite.
+The final result combines that exact-target repair evidence with the preserved
+pre-repair generation full-suite evidence. The repair can complete only when
+the generation run established the selected target failure and verified every
+non-target test. A remaining failed, skipped, or missing non-target result keeps
+the case `NOT_VERIFIED` even when the repaired target passes.
+
 Each invocation writes a batch report to
 `.agent-state/qa-workflow/<run-id>/result.json`. Per-case stage reports and
 results are stored under `cases/001-<case-id>/`, `cases/002-<case-id>/`, and so
-on. A case runs only after the preceding case finishes with `REVIEWED` or
-`ALREADY_COVERED`; any other status stops the batch before the next case can
-modify the same checkout. Each case keeps a separate plan at
+on. A case runs only after the preceding case finishes with `REVIEWED`, or with
+`ALREADY_COVERED` backed by unchanged source and matching verified full-suite
+evidence; any other status stops the batch before the next case can modify the
+same checkout. Each case keeps a separate plan at
 `agent_docs/automation-plans/<case-id>.md`, so processing a later case does not
 replace an earlier case's plan. Each stage report contains its domain result plus
 duration, cycle count, model latency, token counts, cache counts when the

@@ -211,16 +211,19 @@ In this host, the skill's plan template is
 `agent_docs/templates/automation_plan.api.workflow.md.template`, and its
 `automation_plan.md` working artifact is
 `agent_docs/automation-plans/{repository.case_id}.md`.
-If existing coverage proves every behavior in the supplied case, return
-ALREADY_COVERED with the exact existing target and coverage evidence; do not
-generate a duplicate or claim a fresh pass. If the case's Allure ID is occupied
-without equivalent behavior, return BLOCKED with the conflicting target and the
-unmet case behavior; do not rename the case or claim coverage. After
-run_api_tests, return FAILED only when target_status is FAILED. Return
-NOT_VERIFIED when the full-suite status is not VERIFIED for another reason. Do
-not start repair here. Return VERIFIED only when current execution_evidence has
-both status and target_status VERIFIED after the final change. Include the exact
-target and concise plan, changes, result and evidence paths in Implementation.
+If existing coverage proves every behavior in the supplied case, do not create a
+plan or duplicate test. Establish step 3 execution evidence for that exact target:
+reuse current matching full-suite evidence when available, otherwise call
+run_api_tests. Return ALREADY_COVERED only when both the suite status and target
+status are VERIFIED; include the exact existing target and coverage comparison.
+If the case's Allure ID is occupied without equivalent behavior, return BLOCKED
+with the conflicting target and unmet case behavior; do not rename the case or
+claim coverage. After run_api_tests, return FAILED only when target_status is
+FAILED. Return NOT_VERIFIED when the full-suite status is not VERIFIED for
+another reason. Do not start repair here. Return VERIFIED for generated or
+changed code only when current execution_evidence has both status and
+target_status VERIFIED after the final change. Include the exact target and
+concise plan, changes, result and evidence paths in Implementation.
 """,
             [*inspection, write_file, edit_file, run_api_tests],
             Implementation,

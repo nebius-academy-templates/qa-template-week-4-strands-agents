@@ -44,8 +44,7 @@ def _rows_by_case(sheet, case_ids: list[str]) -> tuple[list[str], dict[str, list
     header_rows = [(index, row) for index, row in enumerate(rows) if CASE_ID_HEADER in row]
     if len(header_rows) != 1:
         raise ValueError(
-            f"Worksheet {sheet.title!r} must contain exactly one header row with "
-            f"{CASE_ID_HEADER!r}"
+            f"Worksheet {sheet.title!r} must contain exactly one header row with {CASE_ID_HEADER!r}"
         )
 
     header_index, headers = header_rows[0]

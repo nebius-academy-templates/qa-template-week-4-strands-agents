@@ -88,14 +88,26 @@ class RepositoryStub:
     def diff(self):
         return self.current_diff
 
-    def record_run(self, status="VERIFIED", target_status="VERIFIED", revision="generated"):
+    def record_run(
+        self,
+        status="VERIFIED",
+        target_status="VERIFIED",
+        revision="generated",
+        full_suite=True,
+        non_target_status="VERIFIED",
+        changed=True,
+        target=TARGET,
+    ):
         self.source_revision = revision
-        self.current_diff = f"synthetic diff for {revision}"
-        self.changed_files.add(TEST_PATH)
+        self.current_diff = f"synthetic diff for {revision}" if changed else ""
+        if changed:
+            self.changed_files.add(TEST_PATH)
         self.last_run = {
             "status": status,
             "target_status": target_status,
-            "target": TARGET,
+            "target": target,
+            "full_suite": full_suite,
+            "non_target_status": non_target_status,
             "source_digest": revision,
             "report": f"synthetic-{revision}-report.xml",
         }
@@ -119,7 +131,9 @@ class WorkflowHarness:
         }
         self.actions = {
             "generation": self.repository.record_run,
-            "repair": lambda: self.repository.record_run(revision="repaired"),
+            "repair": lambda: self.repository.record_run(
+                revision="repaired", full_suite=False, non_target_status=None
+            ),
         }
 
     def run(self):

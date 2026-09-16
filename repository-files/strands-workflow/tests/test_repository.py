@@ -198,6 +198,7 @@ class RepositoryTests(unittest.TestCase):
         with patch("repository.subprocess.run", side_effect=self.process):
             result = self.repo.run_api_tests(TARGET, full_suite=False)
         self.assertEqual((result["status"], result["target_status"]), ("VERIFIED", "VERIFIED"))
+        self.assertIsNone(result["non_target_status"])
         self.assertEqual(len(self.calls), 4)
         self.assertIn(":api-tests:ktlintFormat", self.calls[0])
         self.assertIn("before", self.calls[1])
@@ -231,7 +232,7 @@ class RepositoryTests(unittest.TestCase):
         ]:
             with self.subTest(response_name=response_name):
 
-                def process(command, **kwargs):
+                def process(command, response_name=response_name, **kwargs):
                     result = self.process(command, **kwargs)
                     if ":api-tests:test" in command:
                         path = self.root / "api-tests/build/allure-results/sample-result.json"
@@ -244,6 +245,7 @@ class RepositoryTests(unittest.TestCase):
                     result = self.repo.run_api_tests(TARGET)
                 self.assertEqual(result["status"], expected)
                 self.assertEqual(result["target_status"], expected)
+                self.assertEqual(result["non_target_status"], "VERIFIED")
 
     def test_wrong_case_id_cannot_select_a_green_test(self):
         self.repo.case_id = "API-9002"
@@ -259,7 +261,7 @@ class RepositoryTests(unittest.TestCase):
         ]:
             with self.subTest(expected=expected, target=target):
 
-                def process(command, **kwargs):
+                def process(command, status=status, skip=skip, target=target, **kwargs):
                     if ":api-tests:test" in command:
                         self.evidence(status=status, skip=skip, target=target)
                     return subprocess.CompletedProcess(command, 0, "{}")
@@ -288,6 +290,78 @@ class RepositoryTests(unittest.TestCase):
         with patch("repository.subprocess.run", side_effect=process):
             result = self.repo.run_api_tests(TARGET)
         self.assertEqual((result["status"], result["target_status"]), ("FAILED", "VERIFIED"))
+        self.assertEqual(result["non_target_status"], "FAILED")
+
+    def test_target_and_unrelated_failures_remain_distinct(self):
+        other = self.root / "api-tests/src/test/kotlin/tests/OtherApiTest.kt"
+        other.write_text(
+            SOURCE.replace("SampleApiTest", "OtherApiTest")
+            .replace("testScenario", "testOther")
+            .replace('"9001"', '"9002"'),
+            encoding="utf-8",
+        )
+
+        def process(command, **kwargs):
+            if ":api-tests:test" in command:
+                self.evidence(status="failed", other_failure=True)
+            return subprocess.CompletedProcess(
+                command, 1 if ":api-tests:test" in command else 0, "{}"
+            )
+
+        with patch("repository.subprocess.run", side_effect=process):
+            result = self.repo.run_api_tests(TARGET)
+
+        self.assertEqual((result["status"], result["target_status"]), ("FAILED", "FAILED"))
+        self.assertEqual(result["non_target_status"], "FAILED")
+
+    def test_missing_unrelated_result_is_not_verified(self):
+        other = self.root / "api-tests/src/test/kotlin/tests/OtherApiTest.kt"
+        other.write_text(
+            SOURCE.replace("SampleApiTest", "OtherApiTest")
+            .replace("testScenario", "testOther")
+            .replace('"9001"', '"9002"'),
+            encoding="utf-8",
+        )
+
+        with patch("repository.subprocess.run", side_effect=self.process):
+            result = self.repo.run_api_tests(TARGET)
+
+        self.assertEqual((result["status"], result["target_status"]), ("NOT_VERIFIED", "VERIFIED"))
+        self.assertEqual(result["non_target_status"], "NOT_VERIFIED")
+
+    def test_skipped_unrelated_result_is_not_verified(self):
+        other = self.root / "api-tests/src/test/kotlin/tests/OtherApiTest.kt"
+        other.write_text(
+            SOURCE.replace("SampleApiTest", "OtherApiTest")
+            .replace("testScenario", "testOther")
+            .replace('"9001"', '"9002"'),
+            encoding="utf-8",
+        )
+
+        def process(command, **kwargs):
+            result = self.process(command, **kwargs)
+            if ":api-tests:test" in command:
+                junit = self.root / "api-tests/build/test-results/test/TEST-sample.xml"
+                junit.write_text(
+                    junit.read_text(encoding="utf-8").replace(
+                        "</testsuite>",
+                        '<testcase classname="tests.OtherApiTest" name="testOther">'
+                        "<skipped/></testcase></testsuite>",
+                    ),
+                    encoding="utf-8",
+                )
+                allure = self.root / "api-tests/build/allure-results/other-result.json"
+                allure.write_text(
+                    json.dumps({"fullName": "tests.OtherApiTest.testOther", "status": "skipped"}),
+                    encoding="utf-8",
+                )
+            return result
+
+        with patch("repository.subprocess.run", side_effect=process):
+            result = self.repo.run_api_tests(TARGET)
+
+        self.assertEqual((result["status"], result["target_status"]), ("NOT_VERIFIED", "VERIFIED"))
+        self.assertEqual(result["non_target_status"], "NOT_VERIFIED")
 
     def test_process_failure_preserves_logs_and_posts_to_hook(self):
         def process(command, **kwargs):

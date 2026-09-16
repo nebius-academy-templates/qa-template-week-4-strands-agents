@@ -16,8 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from state import Finding, ReviewResult
-from workflow_harness import CASE, TARGET, TEST_PATH, WorkflowHarness
+from state import Finding, ReviewResult  # noqa: E402
+from workflow_harness import CASE, TARGET, TEST_PATH, WorkflowHarness  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -64,6 +64,26 @@ def test_verified_repair_reaches_review_with_repaired_handoff(harness):
     assert "synthetic-repaired-report.xml" in review_input
     assert "synthetic diff for repaired" in review_input
     assert "synthetic diff for failing" not in review_input
+
+
+def test_review_cannot_hide_an_unresolved_non_target_suite_failure(harness):
+    harness.outputs["generation"].status = "FAILED"
+    harness.actions["generation"] = lambda: harness.repository.record_run(
+        status="FAILED",
+        target_status="FAILED",
+        revision="failing",
+        non_target_status="FAILED",
+    )
+
+    result = harness.run()
+
+    assert harness.called_stages == ["readiness", "generation", "repair", "review"]
+    assert result["stages"]["review"]["status"] == "REVIEWED"
+    assert result["status"] == "NOT_VERIFIED"
+    assert result["stages"]["generation"]["evidence"]["non_target_status"] == "FAILED"
+    assert result["stages"]["repair"]["evidence"]["target_status"] == "VERIFIED"
+    assert result["stages"]["repair"]["evidence"]["non_target_status"] is None
+    assert "non-target tests" in result["blocking_reason"]
 
 
 def test_review_finding_becomes_changes_requested(harness):
