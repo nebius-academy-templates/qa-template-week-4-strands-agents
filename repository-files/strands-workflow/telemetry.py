@@ -23,6 +23,23 @@ from strands.hooks import (
 from strands.telemetry import StrandsTelemetry
 
 
+_SEMCONV_OPT_IN = "OTEL_SEMCONV_STABILITY_OPT_IN"
+_REDACT_ALL_SENSITIVE_ATTRIBUTES = "gen_ai_unredacted_attributes="
+
+
+def _require_redacted_native_export() -> None:
+    """Reject native export unless Strands is configured to redact sensitive content."""
+    options = {item.strip() for item in os.getenv(_SEMCONV_OPT_IN, "").split(",") if item.strip()}
+    redaction_options = {
+        item for item in options if item.startswith("gen_ai_unredacted_attributes=")
+    }
+    if redaction_options != {_REDACT_ALL_SENSITIVE_ATTRIBUTES}:
+        raise ValueError(
+            "Native OTLP export requires OTEL_SEMCONV_STABILITY_OPT_IN to include "
+            "gen_ai_unredacted_attributes= with no attribute allowlist"
+        )
+
+
 class Telemetry:
     """Record metadata without prompts, file contents, tool arguments or results."""
 
@@ -32,14 +49,7 @@ class Telemetry:
         self._lock = threading.Lock()
         self._native = None
         if export:
-            # Keep model and tool content redacted in the optional native export.
-            options = [
-                item
-                for item in os.getenv("OTEL_SEMCONV_STABILITY_OPT_IN", "").split(",")
-                if item and not item.startswith("gen_ai_unredacted_attributes=")
-            ]
-            options.append("gen_ai_unredacted_attributes=")
-            os.environ["OTEL_SEMCONV_STABILITY_OPT_IN"] = ",".join(options)
+            _require_redacted_native_export()
             self._native = StrandsTelemetry().setup_otlp_exporter()
 
     def stage(self, event: str, **data: Any) -> None:

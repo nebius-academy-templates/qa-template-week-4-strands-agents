@@ -107,7 +107,20 @@ prove a test result.
 `events.jsonl` records stage, model, tool, duration, status, token, cache-read,
 and cache-write metadata. It excludes prompts, file contents, tool arguments,
 and tool results. Pass `--otel` only when the existing observability setup and
-standard `OTEL_*` environment variables are configured.
+standard `OTEL_*` environment variables are configured. Strands exports prompt
+and tool content unredacted by default, so explicitly require full redaction
+before using `--otel`:
+
+```powershell
+$env:OTEL_SEMCONV_STABILITY_OPT_IN = "gen_ai_unredacted_attributes="
+```
+
+On macOS/Linux, use
+`export OTEL_SEMCONV_STABILITY_OPT_IN="gen_ai_unredacted_attributes="`.
+Other semantic-convention options may be added as comma-separated values, but
+do not add attribute names after `gen_ai_unredacted_attributes=`. The
+application validates this setting and does not rewrite the process
+environment.
 
 ## Offline checks
 
