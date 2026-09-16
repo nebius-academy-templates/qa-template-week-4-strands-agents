@@ -88,15 +88,20 @@ diff, command log, JUnit counts, and Allure attachment evidence. Any source
 change makes earlier execution evidence stale.
 
 Each invocation writes to `.agent-state/qa-workflow/<run-id>/` in the practice
-repository. `result.json` records the domain status and executed stages.
-Individual stage JSON files preserve their handoffs. A graph status of
-`completed` means only that graph execution stopped normally.
+repository. `result.json` records the domain status, executed stages, their
+domain results, and safe aggregate metrics. Each stage also has a JSON report
+containing its domain result plus duration, cycle count, model latency, token counts, cache
+counts when the provider reports them, and per-tool name, count, success, error,
+and total-time values. These metrics are selected directly from the Strands
+result; raw metric summaries, messages, tool arguments, and tool results are not
+serialized. The metrics are not added to the next agent's input. A graph status
+of `completed` means only that graph execution stopped normally.
 
 The application does not commit, push, update tickets, or change the product.
 It has no checkpoint or restart protocol. After an interrupted process, inspect
 the existing repair state and start a new invocation.
 
-## Prompt caching and telemetry
+## Prompt caching and observability
 
 Anthropic runs enable provider-side ephemeral caching for the stable system
 prompt and tool definitions. The default TTL is five minutes. Set
@@ -104,12 +109,12 @@ prompt and tool definitions. The default TTL is five minutes. Set
 hit reduces repeated prompt processing; it does not preserve workflow state or
 prove a test result.
 
-`events.jsonl` records stage, model, tool, duration, status, token, cache-read,
-and cache-write metadata. It excludes prompts, file contents, tool arguments,
-and tool results. Pass `--otel` only when the existing observability setup and
-standard `OTEL_*` environment variables are configured. Strands exports prompt
-and tool content unredacted by default, so explicitly require full redaction
-before using `--otel`:
+The application does not create a second event log. Use `result.json` and the
+stage reports for local outcomes and aggregates. When a detailed chronology is
+needed, pass `--otel` to enable the native Strands OTLP trace exporter. Do this
+only when the existing observability setup and standard `OTEL_*` environment
+variables are configured. Strands exports prompt and tool content unredacted by
+default, so explicitly require full redaction before using `--otel`:
 
 ```powershell
 $env:OTEL_SEMCONV_STABILITY_OPT_IN = "gen_ai_unredacted_attributes="
@@ -120,7 +125,8 @@ On macOS/Linux, use
 Other semantic-convention options may be added as comma-separated values, but
 do not add attribute names after `gen_ai_unredacted_attributes=`. The
 application validates this setting and does not rewrite the process
-environment.
+environment. The model-call limit remains active independently of whether
+native tracing is enabled.
 
 ## Offline checks
 
@@ -169,6 +175,7 @@ workbook case ID; replace the ID and model with the assigned values.
 ```
 
 On macOS or Linux, use `./.venv/bin/python`, forward slashes, and shell line
-continuations. Inspect `result.json`, the executed stage files, matching JUnit
-and Allure artifacts, and telemetry events. Report source-only coverage,
-verified execution, repair outcomes, and review findings as distinct results.
+continuations. Inspect `result.json`, the executed stage files, and matching
+JUnit and Allure artifacts. If native OTLP tracing was enabled, use the trace
+backend for detailed chronology. Report source-only coverage, verified
+execution, repair outcomes, and review findings as distinct results.

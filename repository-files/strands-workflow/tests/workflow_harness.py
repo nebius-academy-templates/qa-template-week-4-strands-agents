@@ -68,8 +68,13 @@ class RepositoryStub:
         self.changed_files = set()
         self.source_revision = "original-source"
         self.current_diff = ""
+        self.evidence_reads = 0
+        self.on_evidence_read = None
 
     def current_evidence(self):
+        self.evidence_reads += 1
+        if self.on_evidence_read:
+            self.on_evidence_read(self.evidence_reads)
         if self.last_run is None:
             return {"status": "NOT_VERIFIED", "reason": "No execution evidence"}
         if self.last_run["source_digest"] != self.source_revision:
@@ -96,21 +101,9 @@ class RepositoryStub:
         }
 
 
-class TelemetryStub:
-    def __init__(self):
-        self.events = []
-        self.on_stage = None
-
-    def stage(self, event, **data):
-        self.events.append({"event": event, **data})
-        if self.on_stage:
-            self.on_stage(event, data)
-
-
 class WorkflowHarness:
     def __init__(self, output_dir):
         self.repository = RepositoryStub(output_dir)
-        self.telemetry = TelemetryStub()
         self.calls = []
         self.outputs: dict[str, BaseModel] = {
             "readiness": Assessment(
@@ -140,7 +133,7 @@ class WorkflowHarness:
             )
             for stage, output in self.outputs.items()
         }
-        result = run_workflow(CASE, self.repository, agents, self.telemetry)
+        result = run_workflow(CASE, self.repository, agents)
         assert (
             json.loads((self.repository.output_dir / "result.json").read_text(encoding="utf-8"))
             == result

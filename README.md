@@ -30,7 +30,9 @@ configuration.
 | `state.py` | Defines the structured results passed between operations. |
 | `workflow.py` | Defines the starter graph and evidence-derived result handling. |
 | `repository.py` | Restricts repository access and validates fresh JUnit and Allure evidence. |
-| `telemetry.py` | Records redacted local metadata and optional OpenTelemetry spans. |
+| `metrics.py` | Selects safe numeric aggregates for local stage reports. |
+| `safety.py` | Limits model calls independently of observability. |
+| `telemetry.py` | Validates redaction and enables optional native Strands OTLP traces. |
 | `main.py` | Loads one complete API case and runs the graph. |
 
 The distributed graph intentionally leaves the supplied `review` agent
@@ -45,7 +47,7 @@ practices.
 | From Markdown to Strands | Inspect how `agents.py` combines repository policy, role instructions, tools, and `AgentSkills`. |
 | Workflow State and Handoffs | Follow the structured results in `state.py` and the evidence added to stage reports. |
 | Building the Workflow Graph | Read the supplied dependencies and conditions in the starter `workflow.py`. |
-| Observing Runs and Reusing Prompt Context | Inspect metadata events in `telemetry.py` and Anthropic cache configuration in `agents.py`. |
+| Observing Runs and Reusing Prompt Context | Inspect aggregate stage metrics in `result.json`, native Strands tracing setup in `telemetry.py`, and Anthropic cache configuration in `agents.py`. |
 | Practice: Add the Review Route | Connect the supplied review agent and require current verified evidence. |
 | Capstone: Run an Evidence-Backed Workflow | Run the completed graph on the assigned API case and inspect its saved evidence. |
 

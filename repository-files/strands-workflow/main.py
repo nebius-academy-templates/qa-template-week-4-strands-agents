@@ -8,11 +8,10 @@ import re
 from pathlib import Path
 from uuid import uuid4
 
-from openpyxl import load_workbook
-
 from agents import make_agents, make_model
+from openpyxl import load_workbook
 from repository import Repository
-from telemetry import Telemetry
+from telemetry import NativeTelemetry
 from workflow import run_workflow
 
 
@@ -64,10 +63,10 @@ def main() -> int:
     output_dir = repository / ".agent-state" / "qa-workflow" / uuid4().hex
     output_dir.mkdir(parents=True)
     adapter = Repository(repository, output_dir, args.case_id, args.api_url)
-    telemetry = Telemetry(output_dir, export=args.otel)
+    telemetry = NativeTelemetry(export=args.otel)
     try:
-        agents = make_agents(adapter, lambda: make_model(args.provider, args.model), telemetry)
-        result = run_workflow(case, adapter, agents, telemetry)
+        agents = make_agents(adapter, lambda: make_model(args.provider, args.model))
+        result = run_workflow(case, adapter, agents)
         print(
             json.dumps(
                 {"status": result["status"], "report": str(output_dir / "result.json")}, indent=2

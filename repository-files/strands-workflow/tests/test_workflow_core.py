@@ -148,4 +148,33 @@ def test_model_exception_produces_final_not_verified_report(harness):
     assert result["graph_status"] != "completed"
     assert harness.called_stages == ["readiness"]
     assert harness.repository.last_run is None
-    assert any(event["event"] == "workflow_end" for event in harness.telemetry.events)
+
+
+def test_stage_reports_include_only_safe_metric_aggregates(harness):
+    result = harness.run()
+
+    metrics = result["stages"]["generation"]["metrics"]
+    assert metrics["model"] == {
+        "cycles": 1,
+        "latency_ms": 0,
+        "stop_reason": "tool_use",
+    }
+    assert metrics["tokens"] == {
+        "input": 2,
+        "output": 3,
+        "total": 5,
+    }
+    assert metrics["tools"]
+    tool = next(iter(metrics["tools"].values()))
+    assert set(tool) == {
+        "calls",
+        "successes",
+        "errors",
+        "duration_ms",
+    }
+    generation_input = harness.input_for("generation")
+    assert '"metrics"' not in generation_input
+    stage_report = (harness.repository.output_dir / "generation.json").read_text(encoding="utf-8")
+    assert '"metrics"' in stage_report
+    assert "messages" not in stage_report
+    assert "input_params" not in stage_report

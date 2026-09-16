@@ -47,6 +47,7 @@ def test_verified_generation_reaches_review_with_current_handoff(harness):
     assert TARGET in review_input
     assert "synthetic-generated-report.xml" in review_input
     assert "synthetic diff for generated" in review_input
+    assert '"metrics"' not in review_input
 
 
 def test_verified_repair_reaches_review_with_repaired_handoff(harness):
@@ -89,18 +90,17 @@ def test_review_finding_becomes_changes_requested(harness):
 
 @pytest.mark.parametrize("change", ["source", "evidence"])
 def test_stale_or_missing_evidence_blocks_review(harness, change):
-    def change_after_generation(event, data):
-        if event == "stage_end" and data["node"] == "generation":
+    def change_before_second_evidence_read(read_number):
+        if read_number == 2:
             if change == "source":
                 harness.repository.source_revision = "changed-without-execution"
             else:
                 harness.repository.last_run = None
 
-    harness.telemetry.on_stage = change_after_generation
+    harness.repository.on_evidence_read = change_before_second_evidence_read
 
     result = harness.run()
 
     assert result["status"] == "NOT_VERIFIED"
     assert harness.called_stages == ["readiness", "generation"]
     assert result["evidence"]["status"] == "NOT_VERIFIED"
-    assert any(event["event"] == "review_blocked" for event in harness.telemetry.events)

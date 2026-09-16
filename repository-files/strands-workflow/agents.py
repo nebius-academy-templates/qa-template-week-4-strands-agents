@@ -5,15 +5,14 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 
+from repository import Repository
+from safety import ModelCallLimit
+from state import Assessment, Implementation, RepairOutcome, ReviewResult
 from strands import Agent, AgentSkills, Skill, tool
 from strands.models import CacheConfig, Model
 from strands.models.anthropic import AnthropicModel
 from strands.models.openai import OpenAIModel
 from strands.tools.executors import SequentialToolExecutor
-
-from repository import Repository
-from state import Assessment, Implementation, RepairOutcome, ReviewResult
-from telemetry import Telemetry
 
 
 def make_model(provider: str, model_id: str) -> Model:
@@ -56,7 +55,6 @@ def _section(document: str, heading: str) -> str:
 def make_agents(
     repository: Repository,
     model_factory: Callable[[], Model],
-    telemetry: Telemetry,
 ) -> dict[str, Agent]:
     """Bootstrap trusted local policy and give each role its own tool set."""
 
@@ -177,7 +175,7 @@ The host writes the stage reports from your structured result.
             tools=tools,
             plugins=[skill_plugin(skill)] if skill else [],
             structured_output_model=schema,
-            hooks=[telemetry.hooks(name)],
+            hooks=[ModelCallLimit()],
             callback_handler=None,
             tool_executor=SequentialToolExecutor(),
         )

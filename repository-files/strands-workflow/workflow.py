@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 
-from strands.hooks import AfterNodeCallEvent, BeforeNodeCallEvent
+from metrics import stage_metrics
+from state import EVIDENCE_STATUSES
+from strands.hooks import AfterNodeCallEvent
 from strands.multiagent import GraphBuilder
 from strands.multiagent.base import Status
-
-from state import EVIDENCE_STATUSES
 
 
 def result_data(state, name: str) -> dict:
@@ -20,7 +20,15 @@ def result_data(state, name: str) -> dict:
         return {}
 
 
-def build_graph(agents: dict, repository, telemetry):
+def stage_report(state, name: str) -> dict:
+    """Combine one stage's domain result with its content-free native metrics."""
+    output = result_data(state, name)
+    if not output:
+        return {}
+    return {**output, "metrics": stage_metrics(state.results[name])}
+
+
+def build_graph(agents: dict, repository):
     """Repair owns its existing run loop and budgets; the graph chooses stages."""
     builder = GraphBuilder()
     for name in ("readiness", "generation", "repair"):
@@ -48,14 +56,10 @@ def build_graph(agents: dict, repository, telemetry):
     builder.set_max_node_executions(4)
     graph = builder.build()
 
-    def before_node(event):
-        telemetry.stage("stage_start", node=event.node_id)
-
     def after_node(event):
         node = event.source.state.results[event.node_id]
         result = node.result
         if getattr(result, "structured_output", None) is None:
-            telemetry.stage("stage_failed", node=event.node_id)
             return
         output = result.structured_output.model_dump()
         if event.node_id in {"generation", "repair"}:
@@ -85,28 +89,17 @@ def build_graph(agents: dict, repository, telemetry):
             )
         result.message = {"role": "assistant", "content": [{"text": json.dumps(output)}]}
         result.structured_output = None
+        report = {**output, "metrics": stage_metrics(node)}
         (repository.output_dir / f"{event.node_id}.json").write_text(
-            json.dumps(output, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-        telemetry.stage(
-            "stage_end",
-            node=event.node_id,
-            status=output["status"],
-            duration_ms=node.execution_time,
-            input_tokens=node.accumulated_usage.get("inputTokens"),
-            output_tokens=node.accumulated_usage.get("outputTokens"),
-            total_tokens=node.accumulated_usage.get("totalTokens"),
-            cache_read_input_tokens=node.accumulated_usage.get("cacheReadInputTokens"),
-            cache_write_input_tokens=node.accumulated_usage.get("cacheWriteInputTokens"),
+            json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
-    graph.add_hook(before_node, BeforeNodeCallEvent)
     graph.add_hook(after_node, AfterNodeCallEvent)
     return graph
 
 
-def run_workflow(case: str, repository, agents: dict, telemetry) -> dict:
-    graph = build_graph(agents, repository, telemetry)
+def run_workflow(case: str, repository, agents: dict) -> dict:
+    graph = build_graph(agents, repository)
     task = (
         f"Complete the API automation workflow for {repository.case_id}. "
         "The request includes source assessment, generation, execution, repair of an "
@@ -118,9 +111,8 @@ def run_workflow(case: str, repository, agents: dict, telemetry) -> dict:
         graph(task)
     except Exception as failure:
         error = type(failure).__name__
-        telemetry.stage("workflow_error", exception_type=error)
     state = graph.state
-    stages = {name: result_data(state, name) for name in state.results}
+    stages = {name: stage_report(state, name) for name in state.results}
     order = [node.node_id for node in state.execution_order]
     final = stages.get(order[-1], {}) if order else {}
     status = final.get("status", "NOT_VERIFIED")
@@ -141,5 +133,4 @@ def run_workflow(case: str, repository, agents: dict, telemetry) -> dict:
     }
     path = repository.output_dir / "result.json"
     path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
-    telemetry.stage("workflow_end", status=status, count=len(order), case_id=repository.case_id)
     return report
