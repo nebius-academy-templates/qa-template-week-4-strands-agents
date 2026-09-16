@@ -12,8 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from state import Implementation
-from workflow_harness import TARGET, TEST_PATH, WorkflowHarness
+from state import Implementation  # noqa: E402
+from workflow_harness import TARGET, TEST_PATH, WorkflowHarness  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
