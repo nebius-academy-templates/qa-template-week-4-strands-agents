@@ -40,7 +40,6 @@ On Windows PowerShell:
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m pip install pytest
 ```
 
 On macOS or Linux:
@@ -48,7 +47,6 @@ On macOS or Linux:
 ```shell
 python3 -m venv .venv
 ./.venv/bin/python -m pip install -r requirements.txt
-./.venv/bin/python -m pip install pytest
 ```
 
 Set either `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in the current environment.
@@ -203,36 +201,16 @@ application validates this setting and does not rewrite the process
 environment. The model-call limit remains active independently of whether
 native tracing is enabled.
 
-## Offline checks
-
-The foundation checks must pass in the distributed starter:
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest tests -q
-```
-
-On macOS or Linux, use `./.venv/bin/python`. These checks use synthetic model
-responses and temporary repositories. They do not establish a live provider
-call, backend response, Gradle run, Kotlin change, or successful review.
-
 ## Practice: Add the Review Route
 
 Connect the supplied `review` agent in `workflow.py`. A verified generation or
 verified repair may proceed to review. Immediately before review starts, read
 the current evidence again and cancel the node when it is missing or stale.
 Do not change agent prompts, repository tools, repair budgets, or evidence
-classification for this task.
-
-The practice contract is executable:
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest practice-tests/test_review_route.py -q
-```
-
-The command is expected to fail in the original starter because the route is
-absent. After the route and freshness gate are implemented, it verifies both
-the generation-to-review and repair-to-review handoffs, review findings, and
-stale-evidence blocking. Run the foundation checks again after it passes.
+classification for this task. After the change, verified generation and repair
+results must reach review with the prepared packet, while missing or stale
+evidence must keep review from running. A review finding must produce
+`CHANGES_REQUESTED`.
 
 ## Capstone: Run an Evidence-Backed Workflow
 

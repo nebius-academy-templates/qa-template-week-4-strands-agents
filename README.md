@@ -50,18 +50,3 @@ practices.
 | Observing Runs and Reusing Prompt Context | Inspect aggregate stage metrics in `result.json`, native Strands tracing setup in `telemetry.py`, and Anthropic cache configuration in `agents.py`. |
 | Practice: Add the Review Route | Connect the supplied review agent and require current verified evidence. |
 | Capstone: Run an Evidence-Backed Workflow | Run the completed graph on the assigned API cases and inspect their saved evidence. |
-
-## Offline verification
-
-From `strands-workflow/`, install the dependencies and run:
-
-```shell
-python -m pip install -r requirements.txt
-python -m pip install pytest
-python -m pytest tests -q
-```
-
-These tests use synthetic model output and do not call a provider, backend,
-Gradle, or a product test. The separate checks under `practice-tests/` express
-the review-route acceptance criteria and are expected to fail before that
-route is implemented.
