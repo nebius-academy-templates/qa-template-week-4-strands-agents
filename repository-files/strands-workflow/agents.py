@@ -117,13 +117,13 @@ The host writes the stage reports from your structured result.
         return repository.current_evidence()
 
     @tool
-    def run_api_tests(target: str) -> dict:
-        """Format the API module, run its full suite fresh and check the selected method.
+    def run_api_test(target: str) -> dict:
+        """Format the API module and run the selected method fresh.
 
         Args:
             target: Fully qualified package.Class.method belonging to the supplied case.
         """
-        return repository.run_api_tests(target, full_suite=True)
+        return repository.run_api_test(target)
 
     repair_target = ""
 
@@ -144,7 +144,7 @@ The host writes the stage reports from your structured result.
         """
         if target != selected_repair_target():
             raise ValueError("Repair may run only the original workflow target")
-        return repository.run_api_tests(target, full_suite=False)
+        return repository.run_api_test(target)
 
     @tool
     def repair_action(action: str, item_id: str = "", outcome: str = "", reason: str = "") -> dict:
@@ -205,27 +205,28 @@ that saved result replaces the procedure's task-automation-readiness.md output.
             "generation",
             f"""Activate gen-api-test with the skills tool and follow its complete procedure.
 Read referenced documents through repository tools and use search_text for the
-coverage inventory. Use run_api_tests for verification: status describes the
-full-suite result, while target_status describes the supplied case's exact method.
+coverage inventory. Use run_api_test for verification; it runs only the supplied
+case's exact Class.method. Both status and target_status describe that exact
+execution.
 In this host, the skill's plan template is
 `agent_docs/templates/automation_plan.api.workflow.md.template`, and its
 `automation_plan.md` working artifact is
 `agent_docs/automation-plans/{repository.case_id}.md`.
 If existing coverage proves every behavior in the supplied case, do not create a
 plan or duplicate test. Establish step 3 execution evidence for that exact target:
-reuse current matching full-suite evidence when available, otherwise call
-run_api_tests. Return ALREADY_COVERED only when both the suite status and target
-status are VERIFIED; include the exact existing target and coverage comparison.
+reuse current matching evidence when available, otherwise call run_api_test.
+Return ALREADY_COVERED only when both status and target_status are VERIFIED;
+include the exact existing target and coverage comparison.
 If the case's Allure ID is occupied without equivalent behavior, return BLOCKED
 with the conflicting target and unmet case behavior; do not rename the case or
-claim coverage. After run_api_tests, return FAILED only when target_status is
-FAILED. Return NOT_VERIFIED when the full-suite status is not VERIFIED for
+claim coverage. After run_api_test, return FAILED only when target_status is
+FAILED. Return NOT_VERIFIED when the exact execution is not VERIFIED for
 another reason. Do not start repair here. Return VERIFIED for generated or
 changed code only when current execution_evidence has both status and
 target_status VERIFIED after the final change. Include the exact target and
 concise plan, changes, result and evidence paths in Implementation.
 """,
-            [*inspection, write_file, edit_file, run_api_tests],
+            [*inspection, write_file, edit_file, run_api_test],
             Implementation,
             "gen-api-test",
         ),

@@ -413,7 +413,6 @@ class Repository:
         expected: list[dict],
         target: str,
         exit_code: int,
-        full_suite: bool,
     ) -> dict:
         cases = [
             case
@@ -451,7 +450,7 @@ class Repository:
             not expected or len(cases) != len(expected) or len(allure) != len(expected)
         )
         if inventory_mismatch:
-            reasons.append("JUnit/Allure counts do not match the selected source tests")
+            reasons.append("JUnit/Allure counts do not match the selected target")
         for item in expected:
             reports = allure_for(item["target"])
             if (
@@ -511,47 +510,21 @@ class Repository:
         reasons.extend(target_reasons)
         if exit_code or counts["skipped"]:
             reasons.append("Command failed or selected tests were skipped")
-        failed = counts["failed"] > 0 or any(
-            item.get("status") in {"failed", "broken"} for item in allure
-        )
-
-        non_target_status = None
-        if full_suite:
-            non_target_results = []
-            for item in expected:
-                if item["target"] == target:
-                    continue
-                item_junit = junit_for(item)
-                item_allure = allure_for(item["target"])
-                item_failed = any(
-                    self._junit_status(case) == "failed" for case in item_junit
-                ) or any(report.get("status") in {"failed", "broken"} for report in item_allure)
-                item_verified = (
-                    len(item_junit) == 1
-                    and self._junit_status(item_junit[0]) == "passed"
-                    and len(item_allure) == 1
-                    and item_allure[0].get("status") == "passed"
-                )
-                if item_failed:
-                    non_target_results.append("FAILED")
-                elif item_verified:
-                    non_target_results.append("VERIFIED")
-                else:
-                    non_target_results.append("NOT_VERIFIED")
-            if "FAILED" in non_target_results:
-                non_target_status = "FAILED"
-            elif inventory_mismatch or "NOT_VERIFIED" in non_target_results:
-                non_target_status = "NOT_VERIFIED"
-            else:
-                non_target_status = "VERIFIED"
+        if inventory_mismatch:
+            status = "NOT_VERIFIED"
+        elif target_failed:
+            status = "FAILED"
+        elif reasons:
+            status = "NOT_VERIFIED"
+        else:
+            status = "VERIFIED"
         return {
-            "status": "FAILED" if failed else "NOT_VERIFIED" if reasons else "VERIFIED",
+            "status": status,
             "target_status": "FAILED"
             if target_failed
             else "VERIFIED"
             if target_passed
             else "NOT_VERIFIED",
-            "non_target_status": non_target_status,
             "counts": counts,
             "reasons": reasons,
         }
@@ -597,7 +570,7 @@ class Repository:
             (folder / "format.log").write_text(run.stdout, encoding="utf-8")
         return run
 
-    def run_api_tests(self, target: str, full_suite=True) -> dict:
+    def run_api_test(self, target: str) -> dict:
         if not isinstance(target, str) or not re.fullmatch(TARGET_PATTERN, target):
             raise ValueError("Use an exact package.Class.method target")
         expected = self._inventory()
@@ -606,15 +579,19 @@ class Repository:
             raise ValueError("Target must identify exactly one existing API test")
         if matching[0]["allure_id"] != self.case_id.removeprefix("API-"):
             raise ValueError("Selected test Allure ID must match the supplied case number")
-        if not full_suite:
-            expected = matching
+        expected = matching
         folder = self.output_dir / ("run-" + uuid.uuid4().hex)
         folder.mkdir()
         (folder / "suite.log").write_text("API test command has not run.\n", encoding="utf-8")
         wrapper = ".\\gradlew.bat" if os.name == "nt" else "./gradlew"
-        command = [wrapper, ":api-tests:test", "--rerun", f"-Dapi.url={self.api_url}"]
-        if not full_suite:
-            command += ["--tests", target]
+        command = [
+            wrapper,
+            ":api-tests:test",
+            "--rerun",
+            f"-Dapi.url={self.api_url}",
+            "--tests",
+            target,
+        ]
         command_text = " ".join(command)
 
         def relative(name: str) -> str:
@@ -625,8 +602,6 @@ class Repository:
             "target_status": "NOT_VERIFIED",
             "target": target,
             "case_id": self.case_id,
-            "full_suite": full_suite,
-            "non_target_status": None,
             "command": command_text,
             "log": relative("suite.log"),
             "junit_dir": relative("junit"),
@@ -678,7 +653,7 @@ class Repository:
                             copy = destination / file.relative_to(source)
                             copy.parent.mkdir(parents=True, exist_ok=True)
                             shutil.copy2(file, copy)
-                summary.update(self._evidence(folder, expected, target, run.returncode, full_suite))
+                summary.update(self._evidence(folder, expected, target, run.returncode))
                 if before != self._source_digest():
                     invalidate("Sources changed during execution")
         except (OSError, ValueError, RuntimeError, ET.ParseError) as error:

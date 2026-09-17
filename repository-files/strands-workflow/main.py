@@ -12,18 +12,18 @@ from agents import make_agents, make_model
 from case_loader import SUPPORTED_SUFFIXES, TEXT_SUFFIXES, read_cases
 from repository import Repository
 from telemetry import NativeTelemetry
-from workflow import run_workflow, verified_full_suite
+from workflow import run_workflow, verified_target
 
 
 def case_succeeded(result: dict) -> bool:
-    """Accept deduplicated coverage only with matching full-suite proof."""
+    """Accept deduplicated coverage only with matching target proof."""
     if result.get("status") == "REVIEWED":
         return True
     generation = result.get("stages", {}).get("generation", {})
     return (
         result.get("status") == "ALREADY_COVERED"
         and result.get("changed_files") == []
-        and verified_full_suite(result.get("evidence", {}), generation.get("target", ""))
+        and verified_target(result.get("evidence", {}), generation.get("target", ""))
     )
 
 

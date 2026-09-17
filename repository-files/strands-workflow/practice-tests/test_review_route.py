@@ -66,24 +66,25 @@ def test_verified_repair_reaches_review_with_repaired_handoff(harness):
     assert "synthetic diff for failing" not in review_input
 
 
-def test_review_cannot_hide_an_unresolved_non_target_suite_failure(harness):
+def test_repair_evidence_for_another_target_never_reaches_review(harness):
+    wrong_target = "tests.OtherApiTest.testOther"
     harness.outputs["generation"].status = "FAILED"
     harness.actions["generation"] = lambda: harness.repository.record_run(
         status="FAILED",
         target_status="FAILED",
         revision="failing",
-        non_target_status="FAILED",
+    )
+    harness.actions["repair"] = lambda: harness.repository.record_run(
+        revision="wrong-target", target=wrong_target
     )
 
     result = harness.run()
 
-    assert harness.called_stages == ["readiness", "generation", "repair", "review"]
-    assert result["stages"]["review"]["status"] == "REVIEWED"
+    assert harness.called_stages == ["readiness", "generation", "repair"]
     assert result["status"] == "NOT_VERIFIED"
-    assert result["stages"]["generation"]["evidence"]["non_target_status"] == "FAILED"
-    assert result["stages"]["repair"]["evidence"]["target_status"] == "VERIFIED"
-    assert result["stages"]["repair"]["evidence"]["non_target_status"] is None
-    assert "non-target tests" in result["blocking_reason"]
+    assert result["stages"]["repair"]["target"] == TARGET
+    assert result["stages"]["repair"]["evidence"]["target"] == wrong_target
+    assert result["stages"]["repair"]["status"] == "NOT_VERIFIED"
 
 
 def test_review_finding_becomes_changes_requested(harness):

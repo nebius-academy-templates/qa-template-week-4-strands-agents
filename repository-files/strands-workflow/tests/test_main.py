@@ -97,7 +97,6 @@ def install_runtime_stubs(monkeypatch, outcomes: dict[str, str | dict]):
                         "changed_files": [],
                         "evidence": {
                             "target": target,
-                            "full_suite": True,
                             "status": "VERIFIED",
                             "target_status": "VERIFIED",
                         },
@@ -311,14 +310,13 @@ def test_batch_runs_cases_in_order_with_fresh_state_and_separate_reports(tmp_pat
     assert telemetry[0].closed is True
 
 
-def test_already_covered_requires_unchanged_source_and_matching_full_suite_evidence():
+def test_already_covered_requires_unchanged_source_and_matching_target_evidence():
     target = "tests.ExistingApiTest.testCase"
     result = {
         "status": "ALREADY_COVERED",
         "changed_files": [],
         "evidence": {
             "target": target,
-            "full_suite": True,
             "status": "VERIFIED",
             "target_status": "VERIFIED",
         },
@@ -343,7 +341,12 @@ def test_already_covered_requires_unchanged_source_and_matching_full_suite_evide
         is False
     )
     assert (
-        entry.case_succeeded({**result, "evidence": {**result["evidence"], "full_suite": False}})
+        entry.case_succeeded(
+            {
+                **result,
+                "evidence": {**result["evidence"], "target_status": "NOT_VERIFIED"},
+            }
+        )
         is False
     )
 

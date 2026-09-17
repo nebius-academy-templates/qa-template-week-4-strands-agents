@@ -187,7 +187,7 @@ class RepositoryTests(unittest.TestCase):
             "repository.subprocess.run",
             return_value=subprocess.CompletedProcess([], 0, json.dumps(denial)),
         ) as process:
-            result = self.repo.run_api_tests(TARGET)
+            result = self.repo.run_api_test(TARGET)
         self.assertEqual(process.call_count, 2)
         self.assertFalse(any(":api-tests:test" in call.args[0] for call in process.call_args_list))
         self.assertEqual(result["status"], "NOT_VERIFIED")
@@ -196,9 +196,8 @@ class RepositoryTests(unittest.TestCase):
     def test_verified_run_has_fresh_artifacts_and_invalidates_after_edit(self):
         self.evidence(status="failed")
         with patch("repository.subprocess.run", side_effect=self.process):
-            result = self.repo.run_api_tests(TARGET, full_suite=False)
+            result = self.repo.run_api_test(TARGET)
         self.assertEqual((result["status"], result["target_status"]), ("VERIFIED", "VERIFIED"))
-        self.assertIsNone(result["non_target_status"])
         self.assertEqual(len(self.calls), 4)
         self.assertIn(":api-tests:ktlintFormat", self.calls[0])
         self.assertIn("before", self.calls[1])
@@ -221,7 +220,7 @@ class RepositoryTests(unittest.TestCase):
             )
 
         with patch("repository.subprocess.run", side_effect=no_reports):
-            result = self.repo.run_api_tests(TARGET)
+            result = self.repo.run_api_test(TARGET)
         self.assertEqual(result["status"], "NOT_VERIFIED")
         self.assertEqual(result["counts"]["total"], 0)
 
@@ -242,15 +241,14 @@ class RepositoryTests(unittest.TestCase):
                     return result
 
                 with patch("repository.subprocess.run", side_effect=process):
-                    result = self.repo.run_api_tests(TARGET)
+                    result = self.repo.run_api_test(TARGET)
                 self.assertEqual(result["status"], expected)
                 self.assertEqual(result["target_status"], expected)
-                self.assertEqual(result["non_target_status"], "VERIFIED")
 
     def test_wrong_case_id_cannot_select_a_green_test(self):
         self.repo.case_id = "API-9002"
         with patch("repository.subprocess.run") as process, self.assertRaises(ValueError):
-            self.repo.run_api_tests(TARGET)
+            self.repo.run_api_test(TARGET)
         process.assert_not_called()
 
     def test_target_failure_skip_and_mismatch_remain_distinct(self):
@@ -267,11 +265,11 @@ class RepositoryTests(unittest.TestCase):
                     return subprocess.CompletedProcess(command, 0, "{}")
 
                 with patch("repository.subprocess.run", side_effect=process):
-                    result = self.repo.run_api_tests(TARGET)
+                    result = self.repo.run_api_test(TARGET)
                 self.assertEqual(result["status"], expected)
                 self.assertEqual(result["target_status"], expected)
 
-    def test_unrelated_suite_failure_does_not_mark_target_failed(self):
+    def test_extra_test_results_do_not_verify_the_exact_run(self):
         other = self.root / "api-tests/src/test/kotlin/tests/OtherApiTest.kt"
         other.write_text(
             SOURCE.replace("SampleApiTest", "OtherApiTest")
@@ -288,11 +286,13 @@ class RepositoryTests(unittest.TestCase):
             )
 
         with patch("repository.subprocess.run", side_effect=process):
-            result = self.repo.run_api_tests(TARGET)
-        self.assertEqual((result["status"], result["target_status"]), ("FAILED", "VERIFIED"))
-        self.assertEqual(result["non_target_status"], "FAILED")
+            result = self.repo.run_api_test(TARGET)
+        self.assertEqual((result["status"], result["target_status"]), ("NOT_VERIFIED", "VERIFIED"))
+        self.assertTrue(
+            any("counts do not match the selected target" in reason for reason in result["reasons"])
+        )
 
-    def test_target_and_unrelated_failures_remain_distinct(self):
+    def test_target_failure_with_extra_results_is_not_verified(self):
         other = self.root / "api-tests/src/test/kotlin/tests/OtherApiTest.kt"
         other.write_text(
             SOURCE.replace("SampleApiTest", "OtherApiTest")
@@ -309,59 +309,8 @@ class RepositoryTests(unittest.TestCase):
             )
 
         with patch("repository.subprocess.run", side_effect=process):
-            result = self.repo.run_api_tests(TARGET)
-
-        self.assertEqual((result["status"], result["target_status"]), ("FAILED", "FAILED"))
-        self.assertEqual(result["non_target_status"], "FAILED")
-
-    def test_missing_unrelated_result_is_not_verified(self):
-        other = self.root / "api-tests/src/test/kotlin/tests/OtherApiTest.kt"
-        other.write_text(
-            SOURCE.replace("SampleApiTest", "OtherApiTest")
-            .replace("testScenario", "testOther")
-            .replace('"9001"', '"9002"'),
-            encoding="utf-8",
-        )
-
-        with patch("repository.subprocess.run", side_effect=self.process):
-            result = self.repo.run_api_tests(TARGET)
-
-        self.assertEqual((result["status"], result["target_status"]), ("NOT_VERIFIED", "VERIFIED"))
-        self.assertEqual(result["non_target_status"], "NOT_VERIFIED")
-
-    def test_skipped_unrelated_result_is_not_verified(self):
-        other = self.root / "api-tests/src/test/kotlin/tests/OtherApiTest.kt"
-        other.write_text(
-            SOURCE.replace("SampleApiTest", "OtherApiTest")
-            .replace("testScenario", "testOther")
-            .replace('"9001"', '"9002"'),
-            encoding="utf-8",
-        )
-
-        def process(command, **kwargs):
-            result = self.process(command, **kwargs)
-            if ":api-tests:test" in command:
-                junit = self.root / "api-tests/build/test-results/test/TEST-sample.xml"
-                junit.write_text(
-                    junit.read_text(encoding="utf-8").replace(
-                        "</testsuite>",
-                        '<testcase classname="tests.OtherApiTest" name="testOther">'
-                        "<skipped/></testcase></testsuite>",
-                    ),
-                    encoding="utf-8",
-                )
-                allure = self.root / "api-tests/build/allure-results/other-result.json"
-                allure.write_text(
-                    json.dumps({"fullName": "tests.OtherApiTest.testOther", "status": "skipped"}),
-                    encoding="utf-8",
-                )
-            return result
-
-        with patch("repository.subprocess.run", side_effect=process):
-            result = self.repo.run_api_tests(TARGET)
-
-        self.assertEqual((result["status"], result["target_status"]), ("NOT_VERIFIED", "VERIFIED"))
-        self.assertEqual(result["non_target_status"], "NOT_VERIFIED")
+            result = self.repo.run_api_test(TARGET)
+        self.assertEqual((result["status"], result["target_status"]), ("NOT_VERIFIED", "FAILED"))
 
     def test_process_failure_preserves_logs_and_posts_to_hook(self):
         def process(command, **kwargs):
@@ -371,7 +320,7 @@ class RepositoryTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0, "{}")
 
         with patch("repository.subprocess.run", side_effect=process):
-            result = self.repo.run_api_tests(TARGET)
+            result = self.repo.run_api_test(TARGET)
         self.assertEqual(result["status"], "NOT_VERIFIED")
         self.assertEqual(len(self.calls), 4)
         self.assertIn("after", self.calls[-1])
@@ -399,7 +348,7 @@ class RepositoryTests(unittest.TestCase):
             return self.process(command, **kwargs)
 
         with patch("repository.subprocess.run", side_effect=process):
-            result = self.repo.run_api_tests(TARGET)
+            result = self.repo.run_api_test(TARGET)
         self.assertEqual(result["status"], "VERIFIED")
         self.assertIn(TEST_PATH, self.repo.changed_files)
         self.assertIn("+    fun testScenario() { }", self.repo.diff())
@@ -415,7 +364,7 @@ class RepositoryTests(unittest.TestCase):
             return self.process(command, **kwargs)
 
         with patch("repository.subprocess.run", side_effect=process):
-            result = self.repo.run_api_tests(TARGET)
+            result = self.repo.run_api_test(TARGET)
         self.assertEqual(result["status"], "NOT_VERIFIED")
         self.assertEqual(rule.read_text(), "original\n")
         self.assertFalse(any(":api-tests:test" in command for command in self.calls))
@@ -431,7 +380,7 @@ class RepositoryTests(unittest.TestCase):
             return result
 
         with patch("repository.subprocess.run", side_effect=process):
-            result = self.repo.run_api_tests(TARGET)
+            result = self.repo.run_api_test(TARGET)
         self.assertEqual(
             (result["status"], result["target_status"]), ("NOT_VERIFIED", "NOT_VERIFIED")
         )

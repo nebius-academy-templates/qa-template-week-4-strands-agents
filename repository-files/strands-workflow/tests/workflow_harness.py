@@ -93,8 +93,6 @@ class RepositoryStub:
         status="VERIFIED",
         target_status="VERIFIED",
         revision="generated",
-        full_suite=True,
-        non_target_status="VERIFIED",
         changed=True,
         target=TARGET,
     ):
@@ -106,8 +104,6 @@ class RepositoryStub:
             "status": status,
             "target_status": target_status,
             "target": target,
-            "full_suite": full_suite,
-            "non_target_status": non_target_status,
             "source_digest": revision,
             "report": f"synthetic-{revision}-report.xml",
         }
@@ -131,9 +127,7 @@ class WorkflowHarness:
         }
         self.actions = {
             "generation": self.repository.record_run,
-            "repair": lambda: self.repository.record_run(
-                revision="repaired", full_suite=False, non_target_status=None
-            ),
+            "repair": lambda: self.repository.record_run(revision="repaired"),
         }
 
     def run(self):
