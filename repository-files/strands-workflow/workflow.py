@@ -53,9 +53,8 @@ def validated_gap_handoff(output: dict, repository) -> bool:
     )
 
 
-def _normalize_coverage_identity(output: dict, repository) -> dict:
+def _normalize_coverage_identity(output: dict, identity: dict) -> dict:
     """Derive the coverage route from the selected case's assigned Allure ID."""
-    identity = repository.coverage_identity(output.get("target", ""))
     if not identity["case_targets"]:
         return {
             **output,
@@ -78,6 +77,184 @@ def _normalize_coverage_identity(output: dict, repository) -> dict:
             "so generation cannot create another test for the selected case"
         ),
     }
+
+
+def _finalize_readiness(output: dict) -> dict:
+    """Replace a model-owned READY handoff with the graph's next action."""
+    if output.get("status") != "READY":
+        return dict(output)
+    return {**output, "next_action_or_question": "Continue to the coverage preflight."}
+
+
+def _finalize_coverage_gap(
+    output: dict,
+    *,
+    case_id: str,
+    coverage_start_fingerprint: str,
+    current_fingerprint: str,
+    sources_changed: bool,
+) -> dict:
+    """Bind a source-only GAP to the case and unchanged coverage snapshot."""
+    if (
+        not coverage_start_fingerprint
+        or current_fingerprint != coverage_start_fingerprint
+        or sources_changed
+    ):
+        return {
+            **output,
+            "status": "NOT_VERIFIED",
+            "summary": (
+                "Repository sources changed during the coverage preflight; "
+                "generation was not authorized"
+            ),
+        }
+    return {
+        **output,
+        "case_id": case_id,
+        "source_fingerprint": current_fingerprint,
+    }
+
+
+def _apply_execution_evidence(
+    output: dict,
+    evidence: dict,
+    *,
+    sources_changed: bool,
+) -> dict:
+    """Derive execution-owned statuses without mutating the model output."""
+    finalized = {**output, "evidence": evidence}
+    claimed_target = output.get("target", "")
+    if output["status"] == "ALREADY_COVERED":
+        if sources_changed:
+            finalized["status"] = "NOT_VERIFIED"
+            finalized["summary"] = "Source changes are incompatible with an already-covered result"
+        elif evidence.get("target") == claimed_target and evidence.get("target_status") == "FAILED":
+            finalized["status"] = "FAILED"
+            finalized["summary"] = "The equivalent existing test failed its exact run"
+        elif not verified_target(evidence, claimed_target):
+            finalized["status"] = "NOT_VERIFIED"
+            finalized["summary"] = (
+                "Equivalent source coverage has no matching verified target evidence"
+            )
+    elif output["status"] in EVIDENCE_STATUSES:
+        if not claimed_target or evidence.get("target") != claimed_target:
+            finalized["status"] = "NOT_VERIFIED"
+            finalized["summary"] = "Execution evidence does not match the selected target"
+        else:
+            finalized["status"] = evidence.get("status", "NOT_VERIFIED")
+            if finalized["status"] == "FAILED" and evidence.get("target_status") != "FAILED":
+                finalized["status"] = "NOT_VERIFIED"
+    return finalized
+
+
+def _enforce_repair_origin(output: dict, evidence: dict, origin_target: str) -> dict:
+    """Require repair evidence for the target selected before repair."""
+    if output["status"] != "VERIFIED" or verified_target(evidence, origin_target):
+        return dict(output)
+    return {
+        **output,
+        "status": "NOT_VERIFIED",
+        "summary": "Repair evidence does not verify the exact target selected before repair",
+    }
+
+
+def _attach_change_context(
+    output: dict,
+    *,
+    changed_files,
+    diff: str,
+    target: str | None = None,
+) -> dict:
+    """Add the repository fields shared by persisted stage handoffs."""
+    finalized = dict(output)
+    if target is not None:
+        finalized["target"] = target
+    finalized["changed_files"] = sorted(changed_files)
+    finalized["diff"] = diff
+    return finalized
+
+
+def _finalize_review(output: dict) -> dict:
+    """Derive the review status from completeness, questions, and findings."""
+    unresolved = any(
+        str(output.get(field, "none")).strip().lower() not in {"", "none"}
+        for field in ("unverified", "question")
+    )
+    status = (
+        "NEEDS_INVESTIGATION"
+        if not output["complete"] or unresolved
+        else "CHANGES_REQUESTED"
+        if output["findings"]
+        else "REVIEWED"
+    )
+    return {**output, "status": status}
+
+
+def _finalize_stage_output(
+    stage: str,
+    output: dict,
+    state,
+    repository,
+    coverage_start_fingerprint: str,
+) -> dict:
+    """Dispatch one structured stage result through the host-owned policies."""
+    if stage == "coverage":
+        identity = repository.coverage_identity(output.get("target", ""))
+        output = _normalize_coverage_identity(output, identity)
+    if stage == "readiness":
+        return _finalize_readiness(output)
+    if stage == "coverage" and output.get("status") == "GAP":
+        current_fingerprint = repository.source_fingerprint()
+        sources_changed = (
+            not coverage_start_fingerprint
+            or current_fingerprint != coverage_start_fingerprint
+            or bool(repository.changed_files)
+        )
+        output = _finalize_coverage_gap(
+            output,
+            case_id=repository.case_id,
+            coverage_start_fingerprint=coverage_start_fingerprint,
+            current_fingerprint=current_fingerprint,
+            sources_changed=sources_changed,
+        )
+        return _attach_change_context(
+            output,
+            changed_files=repository.changed_files,
+            diff=repository.diff(),
+        )
+    if stage in {"coverage", "generation", "repair"}:
+        evidence = repository.current_evidence()
+        claimed_target = output.get("target", "")
+        sources_changed = (
+            bool(repository.changed_files) if output["status"] == "ALREADY_COVERED" else False
+        )
+        output = _apply_execution_evidence(
+            output,
+            evidence,
+            sources_changed=sources_changed,
+        )
+        if stage == "repair" and output["status"] == "VERIFIED":
+            origin = result_data(state, "generation") or result_data(state, "coverage")
+            output = _enforce_repair_origin(output, evidence, origin.get("target", ""))
+        return _attach_change_context(
+            output,
+            target=claimed_target or evidence.get("target", ""),
+            changed_files=repository.changed_files,
+            diff=repository.diff(),
+        )
+    if stage == "review":
+        return _finalize_review(output)
+    return dict(output)
+
+
+def _publish_stage_output(stage: str, node, result, output: dict, output_dir) -> None:
+    """Replace the native result handoff and persist its metrics-bearing report."""
+    result.message = {"role": "assistant", "content": [{"text": json.dumps(output)}]}
+    result.structured_output = None
+    report = {**output, "metrics": stage_metrics(node)}
+    (output_dir / f"{stage}.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
 
 def _final_next_action(status: str, target: str = "") -> str:
@@ -170,90 +347,14 @@ def build_graph(agents: dict, repository, *, include_readiness: bool = True):
         result = node.result
         if getattr(result, "structured_output", None) is None:
             return
-        output = result.structured_output.model_dump()
-        if event.node_id == "coverage":
-            output = _normalize_coverage_identity(output, repository)
-        if event.node_id == "readiness" and output.get("status") == "READY":
-            output["next_action_or_question"] = "Continue to the coverage preflight."
-        elif event.node_id == "coverage" and output.get("status") == "GAP":
-            current_fingerprint = repository.source_fingerprint()
-            if (
-                not coverage_start_fingerprint
-                or current_fingerprint != coverage_start_fingerprint
-                or repository.changed_files
-            ):
-                output["status"] = "NOT_VERIFIED"
-                output["summary"] = (
-                    "Repository sources changed during the coverage preflight; "
-                    "generation was not authorized"
-                )
-            else:
-                # A GAP is source evidence, not execution evidence. The host binds
-                # the handoff to the selected case and exact source state instead.
-                output["case_id"] = repository.case_id
-                output["source_fingerprint"] = current_fingerprint
-            output["changed_files"] = sorted(repository.changed_files)
-            output["diff"] = repository.diff()
-        elif event.node_id in {"coverage", "generation", "repair"}:
-            evidence = repository.current_evidence()
-            output["evidence"] = evidence
-            claimed_target = output.get("target", "")
-            if output["status"] == "ALREADY_COVERED":
-                if repository.changed_files:
-                    output["status"] = "NOT_VERIFIED"
-                    output["summary"] = (
-                        "Source changes are incompatible with an already-covered result"
-                    )
-                elif (
-                    evidence.get("target") == claimed_target
-                    and evidence.get("target_status") == "FAILED"
-                ):
-                    output["status"] = "FAILED"
-                    output["summary"] = "The equivalent existing test failed its exact run"
-                elif not verified_target(evidence, claimed_target):
-                    output["status"] = "NOT_VERIFIED"
-                    output["summary"] = (
-                        "Equivalent source coverage has no matching verified target evidence"
-                    )
-            elif output["status"] in EVIDENCE_STATUSES:
-                if not claimed_target or evidence.get("target") != claimed_target:
-                    output["status"] = "NOT_VERIFIED"
-                    output["summary"] = "Execution evidence does not match the selected target"
-                else:
-                    output["status"] = evidence.get("status", "NOT_VERIFIED")
-                    if output["status"] == "FAILED" and evidence.get("target_status") != "FAILED":
-                        output["status"] = "NOT_VERIFIED"
-            if event.node_id == "repair" and output["status"] == "VERIFIED":
-                origin = result_data(event.source.state, "generation") or result_data(
-                    event.source.state, "coverage"
-                )
-                origin_target = origin.get("target", "")
-                if not verified_target(evidence, origin_target):
-                    output["status"] = "NOT_VERIFIED"
-                    output["summary"] = (
-                        "Repair evidence does not verify the exact target selected before repair"
-                    )
-            output["target"] = claimed_target or evidence.get("target", "")
-            output["changed_files"] = sorted(repository.changed_files)
-            output["diff"] = repository.diff()
-        elif event.node_id == "review":
-            unresolved = any(
-                str(output.get(field, "none")).strip().lower() not in {"", "none"}
-                for field in ("unverified", "question")
-            )
-            output["status"] = (
-                "NEEDS_INVESTIGATION"
-                if not output["complete"] or unresolved
-                else "CHANGES_REQUESTED"
-                if output["findings"]
-                else "REVIEWED"
-            )
-        result.message = {"role": "assistant", "content": [{"text": json.dumps(output)}]}
-        result.structured_output = None
-        report = {**output, "metrics": stage_metrics(node)}
-        (repository.output_dir / f"{event.node_id}.json").write_text(
-            json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+        output = _finalize_stage_output(
+            event.node_id,
+            result.structured_output.model_dump(),
+            event.source.state,
+            repository,
+            coverage_start_fingerprint,
         )
+        _publish_stage_output(event.node_id, node, result, output, repository.output_dir)
 
     async def close_model_clients(event):
         """Close async provider clients before Strands closes its invocation loop."""
