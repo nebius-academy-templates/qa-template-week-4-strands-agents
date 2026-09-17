@@ -1,0 +1,2 @@
+strands-agents[anthropic,openai,otel]==1.55.1
+openpyxl==3.1.5
