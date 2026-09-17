@@ -107,6 +107,7 @@ def run_cases(
                 agents = make_agents(
                     adapter,
                     lambda role, role_models=role_models: make_model(provider, role_models[role]),
+                    case.text,
                     include_readiness=assessment is None,
                 )
             result = run_workflow(

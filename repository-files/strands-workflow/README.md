@@ -78,7 +78,7 @@ of a successful run. The host application supplies those operations separately.
 | `coverage` | Coverage preflight in `gen-api-test` through `AgentSkills` | Read and search source, then run an equivalent existing test's exact target when found. |
 | `generation` | Remaining `gen-api-test` procedure through `AgentSkills` | Reuse a `GAP` handoff, plan, edit permitted API test layers, and run the selected API test method fresh. |
 | `repair` | `test-repair` through `AgentSkills` | Diagnose the selected target, use the existing queue, edit permitted test layers, and rerun that exact target. |
-| `review` | Case-check section of `automate-test-case` | Read the complete case, final test, helpers, plan, diff, and current evidence. |
+| `review` | Case-check section of `automate-test-case` | Receive one host-prepared packet with the complete case, final test, helpers, optional plan, and exact-target evidence. It has no repository tools and may make at most two model calls. |
 
 Every role also receives the complete original case, `AGENTS.md`, and
 `agent_docs/AI_POLICY.md`. A generated status cannot replace the host's JUnit
@@ -87,6 +87,26 @@ and Allure validation. Equivalent source coverage is reported as
 test and no source changed. A bare source-level coverage claim or evidence for
 another target is `NOT_VERIFIED`. An occupied Allure ID without equivalent
 behavior is reported as `BLOCKED`.
+
+The supplied review invocation hook replaces graph task history with one
+`_review_packet` JSON message. The packet contains the full selected case; the
+line-numbered target test; its transitive repository-local Kotlin helpers from
+the API test source tree; the case plan when present; whitelisted JUnit and
+Allure summaries; and ordered HTTP request/response attachments. Therefore, once
+the practice connects the review
+node behind the existing freshness gate, the review model does not repeat
+repository discovery or receive a failed pre-repair run or workflow diff.
+
+Each packet artifact records its repository path, MIME type, byte size, and
+SHA-256 digest. The run report also records a manifest for the selected JUnit
+testcase, complete raw Allure result, and each ordered HTTP attachment; review
+recomputes that manifest before and after packet assembly. Raw Allure parameters,
+details, host/thread metadata, and free-form names are not model input. HTTP HTML
+is converted to text. Authorization, cookie, API-key, sandbox-session, and token
+values are redacted before model input. Missing, ambiguous, unsafe, non-text,
+stale, or oversized required evidence stops review instead of producing a
+partial packet. The complete packet is limited to 128 KiB; each HTTP attachment
+is limited to 16 KiB and HTTP evidence to 64 KiB total.
 
 For workbook input, the host reuses only exact readiness values from
 `Case Summary.Automated Test`: `READY FOR AUTOMATION`, `BLOCKED`, and
@@ -142,6 +162,11 @@ values. These metrics are selected directly from the Strands result; raw metric
 summaries, messages, tool arguments, and tool results are not serialized. The
 metrics are not added to the next agent's input. A graph status of `completed`
 means only that graph execution stopped normally.
+
+After the review route is connected, each case directory also receives a
+`review-packet.json` containing the exact redacted model input. The private
+`_review_packet` message is not copied into stage JSON or the case
+`result.json`.
 
 The application does not commit, push, update tickets, or change the product.
 It has no checkpoint or restart protocol. After an interrupted process, inspect

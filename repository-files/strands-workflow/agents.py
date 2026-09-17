@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Callable
 
@@ -9,10 +10,32 @@ from repository import Repository
 from safety import ModelCallLimit
 from state import Assessment, CoverageDecision, Implementation, RepairOutcome, ReviewResult
 from strands import Agent, AgentSkills, Skill, tool
+from strands.hooks import BeforeInvocationEvent, HookRegistry
 from strands.models import CacheConfig, Model
 from strands.models.anthropic import AnthropicModel
 from strands.models.openai import OpenAIModel
 from strands.tools.executors import SequentialToolExecutor
+
+
+class ReviewPacketInput:
+    """Replace graph context with one host-prepared, exact-target review packet."""
+
+    def __init__(self, repository: Repository, case: str) -> None:
+        self.repository = repository
+        self.case = case
+
+    def register_hooks(self, registry: HookRegistry) -> None:
+        registry.add_callback(BeforeInvocationEvent, self.before_invocation)
+
+    def before_invocation(self, event: BeforeInvocationEvent) -> None:
+        evidence = self.repository.current_evidence()
+        packet = self.repository.prepare_review_packet(self.case, evidence.get("target", ""))
+        event.messages = [
+            {
+                "role": "user",
+                "content": [{"text": json.dumps({"_review_packet": packet}, ensure_ascii=False)}],
+            }
+        ]
 
 
 def make_model(provider: str, model_id: str) -> Model:
@@ -56,6 +79,7 @@ def _section(document: str, heading: str) -> str:
 def make_agents(
     repository: Repository,
     model_factory: Callable[[str], Model],
+    case: str,
     *,
     include_readiness: bool = True,
 ) -> dict[str, Agent]:
@@ -178,7 +202,15 @@ The host writes the stage reports from your structured result.
         skill_path = repository.root / ".agents" / "skills" / name / "SKILL.md"
         return AgentSkills(skills=[Skill.from_file(skill_path, strict=True)], strict=True)
 
-    def agent(name: str, instructions: str, tools: list, schema: type, skill: str = "") -> Agent:
+    def agent(
+        name: str,
+        instructions: str,
+        tools: list,
+        schema: type,
+        skill: str = "",
+        hooks: list | None = None,
+        model_call_limit: int = 120,
+    ) -> Agent:
         return Agent(
             name=name,
             agent_id=name,
@@ -187,7 +219,7 @@ The host writes the stage reports from your structured result.
             tools=tools,
             plugins=[skill_plugin(skill)] if skill else [],
             structured_output_model=schema,
-            hooks=[ModelCallLimit()],
+            hooks=[ModelCallLimit(model_call_limit), *(hooks or [])],
             callback_handler=None,
             tool_executor=SequentialToolExecutor(),
         )
@@ -288,11 +320,11 @@ Follow this operation from the installed automate-test-case instructions:
 
 {case_check}
 
-Read the final test, relevant helpers and case plan when present. Follow setup,
-actions, assertions and resulting state beyond changed lines. Inspect the actual
-matching execution evidence, including relevant HTTP attachments. The diff helps
-locate changes but does not restrict which case requirements may be checked.
-Use read-only tools; do not execute code, write fixes or add an approval gate.
+Use only the host-prepared `_review_packet` in the user message. It contains the
+complete case, line-numbered final test and helpers, optional case plan, and the
+current exact-target JUnit, Allure and ordered HTTP evidence. Do not request or
+infer repository content outside that packet. Do not execute code, write fixes
+or add an approval gate.
 For each gap, put the original case requirement in Finding.check, cite a relevant
 test or helper path and source line, and explain the missing behavior, consequence
 and required change. Check helper behavior before concluding an assertion is absent.
@@ -302,8 +334,10 @@ unverified is 'none' or a concrete claim whose evidence is missing; question is
 'none' or a material question unresolved by the supplied case and repository.
 Keep a passing execution result distinct from full conformance to the case.
 """,
-                inspection,
+                [],
                 ReviewResult,
+                hooks=[ReviewPacketInput(repository, case)],
+                model_call_limit=2,
             ),
         }
     )

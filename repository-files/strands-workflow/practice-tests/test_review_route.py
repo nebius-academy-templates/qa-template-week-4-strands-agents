@@ -6,6 +6,7 @@ the supplied review agent is connected behind fresh verified evidence.
 
 from __future__ import annotations
 
+import json
 import socket
 import sys
 from pathlib import Path
@@ -46,8 +47,12 @@ def test_verified_generation_reaches_review_with_current_handoff(harness):
     assert CASE in review_input
     assert TARGET in review_input
     assert "synthetic-generated-report.xml" in review_input
-    assert "synthetic diff for generated" in review_input
+    assert "synthetic diff for generated" not in review_input
     assert '"metrics"' not in review_input
+    assert "Original Task" not in review_input
+    assert "_review_packet" in review_input
+    assert result["stages"]["review"]["metrics"]["model"]["cycles"] == 1
+    assert "_review_packet" not in json.dumps(result)
 
 
 def test_verified_repair_reaches_review_with_repaired_handoff(harness):
@@ -68,8 +73,9 @@ def test_verified_repair_reaches_review_with_repaired_handoff(harness):
     assert result["status"] == "REVIEWED"
     review_input = harness.input_for("review")
     assert "synthetic-repaired-report.xml" in review_input
-    assert "synthetic diff for repaired" in review_input
+    assert "synthetic diff for repaired" not in review_input
     assert "synthetic diff for failing" not in review_input
+    assert "synthetic-failing-report.xml" not in review_input
 
 
 def test_repair_evidence_for_another_target_never_reaches_review(harness):

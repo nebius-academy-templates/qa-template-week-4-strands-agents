@@ -13,6 +13,7 @@ from strands.models.model import Model
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from agents import ReviewPacketInput
 from state import Assessment, CoverageDecision, Implementation, RepairOutcome, ReviewResult
 from workflow import run_workflow
 
@@ -91,6 +92,25 @@ class RepositoryStub:
     def diff(self):
         return self.current_diff
 
+    def prepare_review_packet(self, case, target):
+        evidence = self.current_evidence()
+        if (
+            evidence.get("status") != "VERIFIED"
+            or evidence.get("target_status") != "VERIFIED"
+            or evidence.get("target") != target
+        ):
+            raise ValueError("synthetic packet requires current exact evidence")
+        packet = {
+            "schema": "synthetic-review-packet",
+            "version": 1,
+            "case": {"case_id": self.case_id, "text": case},
+            "target": {"name": target, "source_digest": evidence["source_digest"]},
+            "sources": {"test": {"path": TEST_PATH, "content": "1: final test"}},
+            "evidence": {"status": "VERIFIED", "report": evidence["report"]},
+        }
+        (self.output_dir / "review-packet.json").write_text(json.dumps(packet), encoding="utf-8")
+        return packet
+
     def record_run(
         self,
         status="VERIFIED",
@@ -159,6 +179,7 @@ class WorkflowHarness:
                 model=model,
                 agent_id=stage,
                 structured_output_model=type(output),
+                hooks=[ReviewPacketInput(self.repository, CASE)] if stage == "review" else [],
                 callback_handler=None,
                 retry_strategy=None,
             )

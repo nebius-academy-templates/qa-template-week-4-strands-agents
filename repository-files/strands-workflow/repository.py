@@ -17,6 +17,8 @@ from copy import deepcopy
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
+from review_packet import build_review_packet, encode_review_packet, evidence_manifest_from_packet
+
 # fmt: off
 TEXT_SUFFIXES = {
     ".md", ".kt", ".kts", ".py", ".yaml", ".yml", ".json", ".jsonl", ".txt", ".log",
@@ -393,6 +395,7 @@ class Repository:
                 name = package[1] + "." + klass[1]
                 found.append(
                     {
+                        "path": file.relative_to(self.root).as_posix(),
                         "class": name,
                         "method": match["method"],
                         "target": name + "." + match["method"],
@@ -407,67 +410,88 @@ class Repository:
 
     @staticmethod
     def _junit_status(case) -> str:
-        if case.find("failure") is not None or case.find("error") is not None:
+        outcomes = {
+            child.tag.rsplit("}", 1)[-1] for child in case.iter() if isinstance(child.tag, str)
+        }
+        if outcomes & {"failure", "error"}:
             return "failed"
-        return "skipped" if case.find("skipped") is not None else "passed"
+        return "skipped" if "skipped" in outcomes else "passed"
 
-    def _evidence(
+    def _archive_file(self, folder: Path, area: str, name: str) -> Path:
+        """Resolve one artifact without permitting a path outside this archived run."""
+        folder = self._contained(folder)
+        if folder.parent != self.output_dir or not folder.name.startswith("run-"):
+            raise ValueError("Execution artifacts must belong to the current workflow output")
+        if (
+            area not in RESULT_DIRS
+            or PurePosixPath(name).name != name
+            or "\\" in name
+            or ":" in name
+        ):
+            raise ValueError("Execution artifact has an unsafe archive path")
+        area_root = self._contained(folder / area)
+        file = self._contained(area_root / name)
+        if not file.is_file() or not file.resolve().is_relative_to(area_root.resolve()):
+            raise ValueError("Execution artifact is missing or outside its archived run")
+        return file
+
+    @staticmethod
+    def _http_attachment_kind(name: str) -> str:
+        lowered = name.lower()
+        if "request" in lowered:
+            return "request"
+        if "response" in lowered or re.match(r"^http/\d+(?:\.\d+)? [1-5]\d{2}(?:\s|$)", lowered):
+            return "response"
+        return ""
+
+    def _select_exact_artifacts(
         self,
         folder: Path,
         expected: list[dict],
         target: str,
-        exit_code: int,
     ) -> dict:
-        cases = [
-            case
-            for file in (folder / "junit").glob("*.xml")
-            for case in ET.parse(file).getroot().iter("testcase")
-        ]
-        allure = [
-            json.loads(file.read_text(encoding="utf-8"))
-            for file in (folder / "allure").glob("*-result.json")
-        ]
-        if any(not isinstance(report, dict) for report in allure):
-            raise ValueError("Allure result must be a JSON object")
-        if any(
-            not isinstance(report.get("fullName"), str) or not isinstance(report.get("status"), str)
-            for report in allure
-        ):
-            raise ValueError("Allure results require a test fullName and status string")
+        """Parse and match the exact artifacts used by both evidence and review."""
+        cases = []
+        junit_root = folder / "junit"
+        for candidate in sorted(junit_root.glob("*.xml")):
+            file = self._archive_file(folder, "junit", candidate.name)
+            cases.extend(
+                {"path": file, "case": case} for case in ET.parse(file).getroot().iter("testcase")
+            )
 
-        def junit_for(item: dict) -> list:
-            names = {item["method"], item["method"] + "()", item["display"]}
-            return [
-                case
-                for case in cases
-                if case.get("classname") == item["class"] and case.get("name") in names
-            ]
-
-        def allure_for(name: str) -> list[dict]:
-            return [report for report in allure if report.get("fullName") == name]
-
-        counts = {"total": len(cases), "passed": 0, "failed": 0, "skipped": 0}
-        for case in cases:
-            counts[self._junit_status(case)] += 1
-        reasons = []
-        inventory_mismatch = (
-            not expected or len(cases) != len(expected) or len(allure) != len(expected)
-        )
-        if inventory_mismatch:
-            reasons.append("JUnit/Allure counts do not match the selected target")
-        for item in expected:
-            reports = allure_for(item["target"])
-            if (
-                len(junit_for(item)) != 1
-                or len(reports) != 1
-                or reports[0].get("status") != "passed"
+        allure = []
+        allure_root = folder / "allure"
+        for candidate in sorted(allure_root.glob("*-result.json")):
+            file = self._archive_file(folder, "allure", candidate.name)
+            report = json.loads(file.read_text(encoding="utf-8"))
+            if not isinstance(report, dict):
+                raise ValueError("Allure result must be a JSON object")
+            if not isinstance(report.get("fullName"), str) or not isinstance(
+                report.get("status"), str
             ):
-                reasons.append(f"Missing, ambiguous, or unsuccessful evidence for {item['target']}")
-        selected = allure_for(target)
-        selected_junit = junit_for(next(item for item in expected if item["target"] == target))
+                raise ValueError("Allure results require a test fullName and status string")
+            allure.append({"path": file, "report": report})
+
+        matches = {}
+        for item in expected:
+            names = {item["method"], item["method"] + "()", item["display"]}
+            matches[item["target"]] = {
+                "junit": [
+                    record
+                    for record in cases
+                    if record["case"].get("classname") == item["class"]
+                    and record["case"].get("name") in names
+                ],
+                "allure": [
+                    record
+                    for record in allure
+                    if record["report"].get("fullName") == item["target"]
+                ],
+            }
+        selected = matches.get(target, {"junit": [], "allure": []})
         attachments = []
 
-        def collect(node):
+        def collect(node) -> None:
             if not isinstance(node, dict):
                 raise ValueError("Allure step must be an object")
             entries, steps = node.get("attachments", []), node.get("steps", [])
@@ -477,36 +501,120 @@ class Repository:
                 or any(not isinstance(entry, dict) for entry in entries)
             ):
                 raise ValueError("Allure steps and attachments must be lists of objects")
-            attachments.extend(entries)
+            for entry in entries:
+                source = entry.get("source", "")
+                try:
+                    path = (
+                        self._archive_file(folder, "allure", source)
+                        if isinstance(source, str) and source
+                        else None
+                    )
+                    error = "" if path else "Missing or unsafe HTTP attachment"
+                except ValueError:
+                    path, error = None, "Missing or unsafe HTTP attachment"
+                attachments.append(
+                    {
+                        "metadata": entry,
+                        "path": path,
+                        "error": error,
+                        "kind": self._http_attachment_kind(str(entry.get("name", ""))),
+                    }
+                )
             for step in steps:
                 collect(step)
 
-        if len(selected) == 1:
-            collect(selected[0])
+        if len(selected["allure"]) == 1:
+            collect(selected["allure"][0]["report"])
+        return {
+            "cases": cases,
+            "allure": allure,
+            "matches": matches,
+            "selected_junit": selected["junit"],
+            "selected_allure": selected["allure"],
+            "attachments": attachments,
+        }
+
+    def _exact_evidence_manifest(self, artifacts: dict, target: str) -> dict:
+        """Fingerprint the exact archived evidence selected for one target."""
+        junit = artifacts["selected_junit"]
+        allure = artifacts["selected_allure"]
+        if len(junit) != 1 or len(allure) != 1:
+            raise ValueError("Exact evidence requires one JUnit testcase and one Allure result")
+
+        def identity(path: Path, raw: bytes, scope: str) -> dict:
+            return {
+                "path": path.relative_to(self.root).as_posix(),
+                "scope": scope,
+                "size_bytes": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+            }
+
+        junit_raw = ET.tostring(junit[0]["case"], encoding="utf-8")
+        allure_raw = allure[0]["path"].read_bytes()
+        http = []
+        for attachment in artifacts["attachments"]:
+            if not attachment["kind"]:
+                continue
+            if attachment["error"] or attachment["path"] is None:
+                raise ValueError("Exact evidence has a missing or unsafe HTTP attachment")
+            path = attachment["path"]
+            item = identity(path, path.read_bytes(), "full-attachment")
+            item.update(index=len(http), kind=attachment["kind"])
+            http.append(item)
+        if {item["kind"] for item in http} != {"request", "response"}:
+            raise ValueError("Exact evidence requires HTTP request and response attachments")
+        return {
+            "version": 1,
+            "target": target,
+            "junit": identity(junit[0]["path"], junit_raw, "matching-testcase"),
+            "allure": identity(allure[0]["path"], allure_raw, "full-result"),
+            "http": http,
+        }
+
+    def _evidence(
+        self,
+        folder: Path,
+        expected: list[dict],
+        target: str,
+        exit_code: int,
+    ) -> dict:
+        artifacts = self._select_exact_artifacts(folder, expected, target)
+        cases = artifacts["cases"]
+        allure = artifacts["allure"]
+
+        counts = {"total": len(cases), "passed": 0, "failed": 0, "skipped": 0}
+        for record in cases:
+            counts[self._junit_status(record["case"])] += 1
+        reasons = []
+        inventory_mismatch = (
+            not expected or len(cases) != len(expected) or len(allure) != len(expected)
+        )
+        if inventory_mismatch:
+            reasons.append("JUnit/Allure counts do not match the selected target")
+        for item in expected:
+            matching = artifacts["matches"][item["target"]]
+            if (
+                len(matching["junit"]) != 1
+                or len(matching["allure"]) != 1
+                or matching["allure"][0]["report"].get("status") != "passed"
+            ):
+                reasons.append(f"Missing, ambiguous, or unsuccessful evidence for {item['target']}")
+        selected = artifacts["selected_allure"]
+        selected_junit = artifacts["selected_junit"]
+        attachments = artifacts["attachments"]
         target_reasons = []
         for attachment in attachments:
-            source = attachment.get("source", "")
-            if (
-                not isinstance(source, str)
-                or not source
-                or PurePosixPath(source).name != source
-                or "\\" in source
-                or ":" in source
-                or not (folder / "allure" / source).is_file()
-            ):
+            if attachment["error"]:
                 target_reasons.append("Missing or unsafe HTTP attachment")
-        names = [str(item.get("name", "")).lower() for item in attachments]
-        # Allure REST Assured names response attachments with the HTTP status line.
-        has_response = any(
-            "response" in name or re.match(r"^http/\d+(?:\.\d+)? [1-5]\d{2}(?:\s|$)", name)
-            for name in names
-        )
-        if not any("request" in name for name in names) or not has_response:
+        kinds = [item["kind"] for item in attachments]
+        if "request" not in kinds or "response" not in kinds:
             target_reasons.append("Target has no attached HTTP request/response evidence")
         if len(selected) != 1 or len(selected_junit) != 1:
             target_reasons.append("Target must have exactly one matching JUnit and Allure result")
-        junit_status = self._junit_status(selected_junit[0]) if len(selected_junit) == 1 else ""
-        allure_status = selected[0].get("status") if len(selected) == 1 else ""
+        junit_status = (
+            self._junit_status(selected_junit[0]["case"]) if len(selected_junit) == 1 else ""
+        )
+        allure_status = selected[0]["report"].get("status") if len(selected) == 1 else ""
         target_failed = junit_status == "failed" or allure_status in {"failed", "broken"}
         target_passed = (
             junit_status == "passed" and allure_status == "passed" and not target_reasons
@@ -522,7 +630,7 @@ class Repository:
             status = "NOT_VERIFIED"
         else:
             status = "VERIFIED"
-        return {
+        result = {
             "status": status,
             "target_status": "FAILED"
             if target_failed
@@ -532,6 +640,80 @@ class Repository:
             "counts": counts,
             "reasons": reasons,
         }
+        if target_passed:
+            result["evidence_manifest"] = self._exact_evidence_manifest(artifacts, target)
+        return result
+
+    def _review_run_folder(self, evidence: dict) -> Path:
+        report_value = evidence.get("report", "")
+        if not isinstance(report_value, str) or not report_value:
+            raise ValueError("Current evidence has no archived run report")
+        report = self._path(report_value)
+        folder = report.parent
+        if (
+            report.name != "result.json"
+            or not report.is_file()
+            or folder.parent != self.output_dir
+            or not folder.name.startswith("run-")
+        ):
+            raise ValueError("Current evidence does not reference this workflow run archive")
+        for area, key in (("junit", "junit_dir"), ("allure", "allure_dir")):
+            value = evidence.get(key, "")
+            if not isinstance(value, str) or self._path(value) != folder / area:
+                raise ValueError("Current evidence artifact paths do not match its run archive")
+        return folder
+
+    def prepare_review_packet(self, case: str, target: str) -> dict:
+        """Build and persist a bounded, redacted packet for the tool-free review agent."""
+        if not isinstance(case, str) or not case.strip():
+            raise ValueError("Review requires the complete selected case")
+        if not isinstance(target, str) or not re.fullmatch(TARGET_PATTERN, target):
+            raise ValueError("Review requires an exact package.Class.method target")
+        evidence = self.current_evidence()
+        if not (
+            evidence.get("status") == "VERIFIED"
+            and evidence.get("target_status") == "VERIFIED"
+            and evidence.get("target") == target
+            and evidence.get("source_digest") == self.source_fingerprint()
+        ):
+            raise ValueError("Review requires current VERIFIED evidence for the exact target")
+        folder = self._review_run_folder(evidence)
+        matching = [item for item in self._inventory() if item["target"] == target]
+        if len(matching) != 1:
+            raise ValueError("Review target must identify exactly one current API test")
+        if matching[0]["allure_id"] != self.case_id.removeprefix("API-"):
+            raise ValueError("Review target Allure ID does not match the selected case")
+        artifacts = self._select_exact_artifacts(folder, matching, target)
+        junit = artifacts["selected_junit"]
+        allure = artifacts["selected_allure"]
+        if len(junit) != 1 or len(allure) != 1:
+            raise ValueError("Review requires exactly one matching JUnit and Allure result")
+        junit_status = self._junit_status(junit[0]["case"])
+        if junit_status != "passed" or allure[0]["report"].get("status") != "passed":
+            raise ValueError("Review requires passing exact-target JUnit and Allure evidence")
+        manifest = evidence.get("evidence_manifest")
+        if not isinstance(manifest, dict) or manifest != self._exact_evidence_manifest(
+            artifacts, target
+        ):
+            raise ValueError("Exact execution evidence changed after its verified run")
+
+        packet = build_review_packet(
+            self, case, target, evidence, matching[0], artifacts, junit_status
+        )
+        if manifest != evidence_manifest_from_packet(packet):
+            raise ValueError("Review packet evidence differs from its verified run")
+
+        # Packet assembly reads source and artifact files. Recompute both identities
+        # afterwards so a concurrent mutation cannot become review input.
+        if evidence["source_digest"] != self.source_fingerprint():
+            raise ValueError("Repository sources changed while assembling the review packet")
+        refreshed = self._select_exact_artifacts(folder, matching, target)
+        if manifest != self._exact_evidence_manifest(refreshed, target):
+            raise ValueError("Exact execution evidence changed while assembling the review packet")
+
+        encoded = encode_review_packet(packet)
+        (self.output_dir / "review-packet.json").write_bytes(encoded + b"\n")
+        return packet
 
     def _format_api_tests(self, wrapper: str, folder: Path):
         """Capture module formatting in the review diff and restore out-of-scope edits."""
@@ -619,6 +801,7 @@ class Repository:
             summary["reasons"].append(reason)
 
         approved = False
+        executed_source_digest = None
         run = subprocess.CompletedProcess(command, 127, "Execution did not start")
         try:
             if format_sources:
@@ -646,7 +829,7 @@ class Repository:
                         previous = folder / "previous" / name
                         previous.parent.mkdir(exist_ok=True)
                         shutil.move(str(source), str(previous))
-                before = self._source_digest()
+                executed_source_digest = self.source_fingerprint()
                 run = self._run(command, folder / "suite.log")
                 for name, path in RESULT_DIRS.items():
                     source = self._path(path)
@@ -659,8 +842,6 @@ class Repository:
                             copy.parent.mkdir(parents=True, exist_ok=True)
                             shutil.copy2(file, copy)
                 summary.update(self._evidence(folder, expected, target, run.returncode))
-                if before != self._source_digest():
-                    invalidate("Sources changed during execution")
         except (OSError, ValueError, RuntimeError, ET.ParseError) as error:
             invalidate(str(error))
         finally:
@@ -671,8 +852,11 @@ class Repository:
                     )
                 except (OSError, ValueError, RuntimeError) as error:
                     invalidate(str(error))
+        current_source_digest = self.source_fingerprint()
+        if executed_source_digest is not None and executed_source_digest != current_source_digest:
+            invalidate("Sources changed during or after execution")
         summary["exit_code"] = run.returncode
-        summary["source_digest"] = self._source_digest()
+        summary["source_digest"] = executed_source_digest or current_source_digest
         summary["report"] = relative("result.json")
         (folder / "result.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
         self.last_run = deepcopy(summary)

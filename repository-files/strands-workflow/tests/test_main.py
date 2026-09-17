@@ -75,12 +75,13 @@ def install_runtime_stubs(monkeypatch, outcomes: dict[str, str | dict]):
         models.append((provider, model, instance))
         return instance
 
-    def make_agents(repository, model_factory, *, include_readiness=True):
+    def make_agents(repository, model_factory, case, *, include_readiness=True):
         roles = ["coverage", "generation", "repair", "review"]
         if include_readiness:
             roles.insert(0, "readiness")
         agents = {
             "case_id": repository.case_id,
+            "case": case,
             "models": {role: model_factory(role) for role in roles},
         }
         agent_sets.append(agents)
