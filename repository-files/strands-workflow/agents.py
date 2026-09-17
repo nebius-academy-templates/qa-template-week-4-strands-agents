@@ -1,4 +1,4 @@
-"""Five QA roles using repository procedures and native Strands tools."""
+"""Four QA roles using repository procedures and native Strands tools."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from collections.abc import Callable
 
 from repository import Repository
 from safety import ModelCallLimit
-from state import Assessment, CoverageDecision, Implementation, RepairOutcome, ReviewResult
+from state import Assessment, Implementation, RepairOutcome, ReviewResult
 from strands import Agent, AgentSkills, Skill, tool
 from strands.hooks import BeforeInvocationEvent, HookRegistry
 from strands.models import CacheConfig, Model
@@ -38,7 +38,7 @@ class ReviewPacketInput:
         ]
 
 
-def make_model(provider: str, model_id: str) -> Model:
+def make_model(provider: str, model_id: str, effort: str = "medium") -> Model:
     """Use the selected provider and model with credentials from the environment."""
     if provider not in {"anthropic", "openai"}:
         raise ValueError("Choose anthropic or openai")
@@ -59,7 +59,7 @@ def make_model(provider: str, model_id: str) -> Model:
             client_args=client_args,
             model_id=model_id,
             max_tokens=8192,
-            params={"output_config": {"effort": "medium"}},
+            params={"output_config": {"effort": effort}},
             cache_config=CacheConfig(
                 ttl=cache_ttl,
                 system_prompt_ttl=True,
@@ -80,7 +80,6 @@ def make_agents(
     repository: Repository,
     model_factory: Callable[[str], Model],
     case: str,
-    *,
     include_readiness: bool = True,
 ) -> dict[str, Agent]:
     """Bootstrap trusted local policy and give each role its own tool set."""
@@ -152,15 +151,6 @@ The host writes the stage reports from your structured result.
         """
         return repository.run_api_test(target)
 
-    @tool
-    def run_coverage_test(target: str) -> dict:
-        """Run an equivalent existing API test without formatting or changing sources.
-
-        Args:
-            target: Fully qualified package.Class.method belonging to the supplied case.
-        """
-        return repository.run_api_test(target, format_sources=False)
-
     repair_target = ""
 
     def selected_repair_target() -> str:
@@ -231,80 +221,63 @@ The host writes the stage reports from your structured result.
         document(".agents/skills/automate-test-case/SKILL.md"),
         "4. Check the test against the test case",
     )
-    agents = {}
-    if include_readiness:
-        agents["readiness"] = agent(
-            "readiness",
-            f"""Assess the selected case using this original procedure:
-{document(readiness_path)}
-
-This stage reads source evidence only. Do not inspect local service availability,
-installed tooling or credentials. Do not implement or execute tests. Return the
-Assessment schema; the host saves this structured assessment. In this workflow,
-that saved result replaces the procedure's task-automation-readiness.md output.
-""",
-            sources,
-            Assessment,
-        )
-    agents.update(
-        {
-            "coverage": agent(
-                "coverage",
-                """Activate gen-api-test with the skills tool and perform only its Coverage
-preflight for the complete supplied case. Search the existing API tests and compare
-all preconditions, actions, expected results and resulting state. Do not create a
-plan, edit a file or implement a test.
-Coverage for the selected case is bound to its assigned Allure ID. If no target
-has that exact ID, return GAP even when a test under another ID has semantically
-equivalent behavior; that other test is only an implementation reference. Do not
-plan, edit or run Gradle for this GAP. If the assigned ID is occupied by
-non-equivalent behavior, return BLOCKED and explain the conflict. If the exact-ID
-target is equivalent, establish current execution evidence for its exact
-package.Class.method: reuse matching current evidence or call run_coverage_test.
-Return ALREADY_COVERED only when both status and target_status are VERIFIED.
-Return FAILED only when that exact target has target_status FAILED. Return
-NOT_VERIFIED for other missing or mismatched execution evidence. Include the
-exact target when one exists and summarize the comparison or conflict in
-CoverageDecision.
-""",
-                [*sources, execution_evidence, run_coverage_test],
-                CoverageDecision,
-                "gen-api-test",
-            ),
-            "generation": agent(
-                "generation",
-                f"""Activate gen-api-test with the skills tool. The host validated the preceding
-coverage node's GAP handoff for this case and current source fingerprint. Begin
-with the plan and do not repeat coverage. If the assigned Allure ID became
-occupied after that handoff, stop with BLOCKED. A similar test under another ID
-is only an implementation reference and does not invalidate the GAP.
-Use run_api_test for verification; it runs only the supplied case's exact
-Class.method. Both status and target_status describe that exact execution. In this
-host, the skill's plan template is
+    existing_test_instruction = (
+        """This invocation uses --skip-implemented. Before any edit or execution, compare
+the existing assigned-ID test and its helpers with the complete case: preconditions,
+actions, every expected result and resulting state. If all requirements are already
+implemented by an enabled JUnit test, return ALREADY_IMPLEMENTED with its exact target
+and a summary mapping
+the requirements to source paths and lines. Finding the ID alone is insufficient.
+Do not edit files, create a plan or run tests for that outcome; it is a source-only
+decision, not fresh execution proof. If requirements are missing, complete the
+implementation and run it normally. A test under another ID cannot be skipped.
+"""
+        if repository.skip_implemented
+        else """Use run_api_test for fresh verification of the selected case, including an
+existing implementation. Do not return ALREADY_IMPLEMENTED in this invocation.
+"""
+    )
+    agents = {
+        "generation": agent(
+            "generation",
+            f"""Activate gen-api-test with the skills tool in its assigned-case automation mode.
+Automate the supplied case; this workflow does not select cases by coverage.
+Check its assigned Allure ID before editing. If it identifies an implementation
+of this case, use that method and complete any missing case requirements instead
+of creating another test. If the ID identifies unrelated behavior or multiple
+tests, return BLOCKED and describe the conflict. A test under another ID is only
+an implementation reference; it cannot discharge the selected assignment.
+Do not perform a coverage assessment.
+{existing_test_instruction}
+run_api_test executes only the supplied package.Class.method. Both status and
+target_status must verify that exact method when execution is required.
+In this host, the skill's plan template is
 `agent_docs/templates/automation_plan.api.workflow.md.template`, and its
 `automation_plan.md` working artifact is
 `agent_docs/automation-plans/{repository.case_id}.md`.
 After run_api_test, return FAILED only when target_status is FAILED. Return
-NOT_VERIFIED when the exact execution is not VERIFIED for another reason. Do not
-start repair here. Return VERIFIED only when current execution_evidence has both
-status and target_status VERIFIED after the final change. Include the exact target
-and concise plan, changes, result and evidence paths in Implementation.
+VERIFICATION_INCOMPLETE when status is not VERIFIED for another reason. Do not start repair
+here. Return VERIFIED only when current execution_evidence has both status and
+target_status VERIFIED after the final change. Include the exact target and a
+concise plan, changes, result and evidence paths in Implementation.
 """,
-                [*inspection, write_file, edit_file, run_api_test],
-                Implementation,
-                "gen-api-test",
-            ),
-            "repair": agent(
-                "repair",
-                """Activate test-repair with the skills tool and follow its complete procedure.
+            [*inspection, write_file, edit_file, run_api_test],
+            Implementation,
+            "gen-api-test",
+        ),
+        "repair": agent(
+            "repair",
+            """Activate test-repair with the skills tool and follow its complete procedure.
 The CLI request already authorizes its conditional repair of this one case.
-Use only the target from the preceding coverage or generation run. The existing repair CLI
-and PRE/POST hooks own queue state, attempt limits and proof; add no repair budget.
+Use only the target from the preceding generation run. The existing
+repair CLI and PRE/POST hooks own queue state, attempt limits and proof; add no
+repair budget.
 Use repair_action for its documented queue commands and run_repair_test for the
 exact fresh run. Inspect execution_evidence and the raw artifacts before triage.
-If pending work is locked first, compare its target with this workflow's target.
-Never repair an unrelated item. Release only a lock you acquired in this stage
-when it belongs to another target; return NEEDS_INVESTIGATION. Never unlock or
+Inspect the queue before locking; acquire an item only when the first pending
+target matches this workflow's target, as the skill requires. Never repair an
+unrelated item. If the queue changed between inspection and locking, release only
+the mismatched lock acquired by this stage and return NEEDS_INVESTIGATION. Never unlock or
 complete another worker's item. Change only the selected test and test-layer
 support implicated by evidence; never change another test to green the suite.
 Classify before editing. Stop for a product bug, missing decisive evidence or an
@@ -314,13 +287,13 @@ owned queue item using the canonical procedure. Read the queue counters instead
 of inventing retries. Return EXHAUSTED at its stop limit. Never report VERIFIED
 from a stale, skipped, zero-test or failed run. Return the RepairOutcome schema.
 """,
-                [*inspection, write_file, edit_file, run_repair_test, repair_action],
-                RepairOutcome,
-                "test-repair",
-            ),
-            "review": agent(
-                "review",
-                f"""Check the final automated test against the complete original selected case.
+            [*inspection, write_file, edit_file, run_repair_test, repair_action],
+            RepairOutcome,
+            "test-repair",
+        ),
+        "review": agent(
+            "review",
+            f"""Check the final automated test against the complete original selected case.
 Follow this operation from the installed automate-test-case instructions:
 
 {case_check}
@@ -339,11 +312,30 @@ unverified is 'none' or a concrete claim whose evidence is missing; question is
 'none' or a material question unresolved by the supplied case and repository.
 Keep a passing execution result distinct from full conformance to the case.
 """,
-                [],
-                ReviewResult,
-                hooks=[ReviewPacketInput(repository, case)],
-                model_call_limit=2,
-            ),
-        }
-    )
+            [],
+            ReviewResult,
+            hooks=[ReviewPacketInput(repository, case)],
+            model_call_limit=2,
+        ),
+    }
+    if include_readiness:
+        agents["readiness"] = agent(
+            "readiness",
+            f"""Assess the selected case's requirements and automation capabilities using
+the original procedure below. Inspect test infrastructure only to establish
+whether it can prepare, perform and observe the case. A READY result proceeds to
+generation, which owns the assigned-ID check, implementation and exact test run.
+
+{document(readiness_path)}
+
+This stage reads source evidence only. Do not inspect local service availability,
+installed tooling or credentials. Do not implement or execute tests. Return the
+Assessment schema; the host saves this structured assessment. In this workflow,
+that saved result replaces the procedure's task-automation-readiness.md output.
+Do not assess existing coverage or substitute another case's test for the
+selected assignment, even if an older readiness procedure requests that comparison.
+""",
+            sources,
+            Assessment,
+        )
     return agents

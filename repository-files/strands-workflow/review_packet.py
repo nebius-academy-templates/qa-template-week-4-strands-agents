@@ -137,8 +137,8 @@ def _artifact(root: Path, path: Path, mime_type: str, raw: bytes, content: str, 
 
 
 def _source(repository, path: Path, mime_type: str) -> dict:
-    path = repository._contained(path)
-    if not path.is_file() or not repository._readable(path):
+    path = repository.ensure_safe(path)
+    if not path.is_file() or not repository.is_readable(path):
         raise ValueError("Required review source is unavailable")
     raw = path.read_bytes()
     if len(raw) > MAX_SOURCE_BYTES:
@@ -152,15 +152,15 @@ def _source(repository, path: Path, mime_type: str) -> dict:
 
 def _kotlin_helpers(repository, target_path: Path) -> list[Path]:
     """Resolve the target's transitive repository-local Kotlin dependencies."""
-    source_root = repository._contained(repository.root / "api-tests/src/test/kotlin")
-    target_path = repository._contained(target_path)
+    source_root = repository.ensure_safe(repository.root / "api-tests/src/test/kotlin")
+    target_path = repository.ensure_safe(target_path)
     records: dict[Path, tuple[str, str]] = {}
     symbols: dict[str, list[Path]] = {}
 
     candidates = [target_path, *sorted(source_root.rglob("*.kt"))]
     for candidate in dict.fromkeys(candidates):
-        file = repository._contained(candidate)
-        if not file.is_file() or not repository._readable(file):
+        file = repository.ensure_safe(candidate)
+        if not file.is_file() or not repository.is_readable(file):
             raise ValueError("Kotlin review dependency is unavailable")
         try:
             text = file.read_text(encoding="utf-8-sig")
@@ -195,9 +195,10 @@ def _kotlin_helpers(repository, target_path: Path) -> list[Path]:
         candidates = sorted(set(symbols.get(fq_name, [])))
         if not candidates:
             return False
-        if len(candidates) != 1:
-            raise ValueError(f"Ambiguous local Kotlin symbol: {fq_name}")
-        add_file(candidates[0])
+        # Include every declaration instead of attempting Kotlin overload resolution.
+        # Compilation and the fresh test run establish whether declarations are valid.
+        for candidate in candidates:
+            add_file(candidate)
         return True
 
     def add_import(reference: str) -> None:
@@ -385,10 +386,10 @@ def build_review_packet(
     if {item["kind"] for item in http} != {"request", "response"}:
         raise ValueError("Review requires ordered HTTP request and response attachment text")
 
-    test = _source(repository, repository._path(target_record["path"]), "text/x-kotlin")
+    test = _source(repository, repository.path_for(target_record["path"]), "text/x-kotlin")
     helpers = [
         _source(repository, file, "text/x-kotlin")
-        for file in _kotlin_helpers(repository, repository._path(target_record["path"]))
+        for file in _kotlin_helpers(repository, repository.path_for(target_record["path"]))
     ]
     plan_path = repository.root / f"agent_docs/automation-plans/{repository.case_id}.md"
     plan = _source(repository, plan_path, "text/markdown") if plan_path.is_file() else None

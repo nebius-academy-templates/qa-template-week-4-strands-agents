@@ -29,7 +29,10 @@ configuration.
 | `agents.py` | Builds the four agents from repository policy, role instructions, tools, and installed skills. |
 | `state.py` | Defines the structured results passed between operations. |
 | `workflow.py` | Defines the starter graph and evidence-derived result handling. |
-| `repository.py` | Restricts repository access and validates fresh JUnit and Allure evidence. |
+| `workspace.py` | Restricts repository file access and computes source fingerprints. |
+| `repository.py` | Runs the exact API test through the existing repair hook. |
+| `evidence.py` | Validates matching fresh JUnit and Allure evidence. |
+| `process_runner.py` | Stops owned test processes on timeout. |
 | `metrics.py` | Selects safe numeric aggregates for local stage reports. |
 | `safety.py` | Limits model calls independently of observability. |
 | `telemetry.py` | Validates redaction and enables optional native Strands OTLP traces. |
@@ -39,6 +42,12 @@ The distributed graph intentionally leaves the supplied `review` agent
 disconnected. This is the bounded code change in the first practice. The
 completed graph is then used for the capstone. These are the package's only two
 practices.
+
+Generation checks each case's assigned Allure ID. For a repeated batch,
+`--skip-implemented` skips a complete unchanged implementation after source
+inspection and reports `ALREADY_IMPLEMENTED`, without claiming a fresh passing
+run. Other cases continue through generation, exact execution and conditional
+repair. The backend address is fixed at `http://127.0.0.1:8080`.
 
 ## Course use
 

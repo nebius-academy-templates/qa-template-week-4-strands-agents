@@ -9,39 +9,60 @@ from pathlib import Path
 from uuid import uuid4
 
 from agents import make_agents, make_model
-from case_loader import (
-    SUPPORTED_SUFFIXES,
-    TEXT_SUFFIXES,
-    CaseInput,
-    read_cases,
-    validate_prepared_case,
-)
+from case_loader import SUPPORTED_SUFFIXES, TEXT_SUFFIXES, CaseInput, read_cases
 from repository import Repository
 from state import Assessment
 from telemetry import NativeTelemetry
-from workflow import run_workflow, verified_target
+from workflow import run_workflow
 
-ANALYSIS_ROLES = frozenset({"readiness", "coverage", "review"})
+ANALYSIS_ROLES = frozenset({"readiness", "review"})
 
 
 def resolve_analysis_model(provider: str, model: str, analysis_model: str | None) -> str:
-    """Keep the established single-model behavior outside the Anthropic course setup."""
     if analysis_model:
         return analysis_model
     return "claude-sonnet-5" if provider == "anthropic" else model
 
 
-def case_succeeded(result: dict) -> bool:
-    """Accept deduplicated coverage only with matching target proof."""
-    if result.get("status") == "REVIEWED":
-        return True
-    stages = result.get("stages", {})
-    coverage = stages.get("coverage", {})
-    return (
-        result.get("status") == "ALREADY_COVERED"
-        and result.get("changed_files") == []
-        and verified_target(result.get("evidence", {}), coverage.get("target", ""))
-    )
+def initial_readiness(
+    case: CaseInput,
+    prepared_cases: bool,
+    reassess_readiness: bool,
+) -> tuple[Assessment | None, str]:
+    """Choose cached, deterministic, or model readiness without treating TODO as status."""
+    if prepared_cases and reassess_readiness:
+        raise ValueError("--prepared-cases and --reassess-readiness are mutually exclusive")
+    if reassess_readiness:
+        return None, "model_reassessment"
+    if case.readiness_status:
+        next_action = (
+            "Automate and execute the selected case."
+            if case.readiness_status == "READY"
+            else "Keep the recorded status unless an explicit reassessment is requested."
+        )
+        return (
+            Assessment(
+                status=case.readiness_status,
+                reason_and_evidence=(
+                    "Reused the exact readiness status from Case Summary.Automated Test."
+                ),
+                next_action_or_question=next_action,
+            ),
+            "workbook_status",
+        )
+    if prepared_cases:
+        return (
+            Assessment(
+                status="READY",
+                reason_and_evidence=(
+                    "The prepared case passed deterministic workbook structure validation; "
+                    "model-based readiness assessment was intentionally skipped."
+                ),
+                next_action_or_question="Automate and execute the selected case.",
+            ),
+            "prepared_preflight",
+        )
+    return None, "model"
 
 
 def validate_case_selection(case_ids: list[str], case_path: Path) -> None:
@@ -63,53 +84,108 @@ def run_cases(
     case_ids: list[str],
     provider: str,
     model: str,
-    api_url: str,
     export_otel: bool = False,
     analysis_model: str | None = None,
     prepared_cases: bool = False,
     reassess_readiness: bool = False,
+    skip_implemented: bool = False,
 ) -> tuple[dict, Path]:
     """Run isolated single-case graphs in the requested order."""
-    if prepared_cases and reassess_readiness:
-        raise ValueError(
-            "Prepared-case preflight and readiness reassessment are mutually exclusive"
-        )
     validate_case_selection(case_ids, case_path)
+    if prepared_cases and reassess_readiness:
+        raise ValueError("--prepared-cases and --reassess-readiness are mutually exclusive")
     if prepared_cases and case_path.suffix.lower() != ".xlsx":
         raise ValueError("--prepared-cases requires an XLSX workbook with structured case fields")
     # Validate every selection before the first graph can change repository files.
-    cases = read_cases(case_path, case_ids)
-    if prepared_cases:
-        for case in cases:
-            validate_prepared_case(case)
-    selected_analysis_model = resolve_analysis_model(provider, model, analysis_model)
+    cases = read_cases(
+        case_path,
+        case_ids,
+        require_complete_fields=prepared_cases,
+    )
     output_dir = repository / ".agent-state" / "qa-workflow" / uuid4().hex
     output_dir.mkdir(parents=True)
     case_results = []
     stopped = False
-    telemetry = NativeTelemetry(export=export_otel)
+    report_path = output_dir / "result.json"
+    report = {
+        "batch_status": "RUNNING",
+        "models": {
+            "analysis": resolve_analysis_model(provider, model, analysis_model),
+            "implementation": model,
+        },
+        "readiness_mode": (
+            "reassess"
+            if reassess_readiness
+            else "prepared"
+            if prepared_cases
+            else "reuse_or_assess"
+        ),
+        "requested_case_ids": case_ids,
+        "skip_implemented": skip_implemented,
+        "active_case_id": None,
+        "cases": case_results,
+    }
+
+    def save_report() -> None:
+        processed = [result["case_id"] for result in case_results]
+        report.update(
+            processed_case_ids=processed,
+            remaining_case_ids=case_ids[len(processed) :],
+            stopped_after=processed[-1] if stopped and processed else None,
+        )
+        temporary = report_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(report_path)
+
+    def record_error(error: BaseException, phase: str) -> None:
+        nonlocal stopped
+        stopped = True
+        detail = {
+            "type": type(error).__name__,
+            "message": str(error),
+            "case_id": report["active_case_id"],
+            "phase": phase,
+        }
+        report["cleanup_error" if "error" in report else "error"] = detail
+        report["batch_status"] = "STOPPED"
+        save_report()
+
+    save_report()
+    telemetry = None
+    phase = "telemetry_setup"
     try:
+        telemetry = NativeTelemetry(export=export_otel)
         for index, case in enumerate(cases, 1):
             case_id = case.case_id
+            report["active_case_id"] = case_id
+            save_report()
+            phase = "case_setup"
             case_output = output_dir / "cases" / f"{index:03d}-{case_id}"
-            adapter = Repository(repository, case_output, case_id, api_url)
-            assessment, readiness_source = readiness_for_case(
-                case,
-                prepared_cases=prepared_cases,
-                reassess_readiness=reassess_readiness,
+            adapter = Repository(
+                repository, case_output, case_id, skip_implemented=skip_implemented
+            )
+            assessment, readiness_source = initial_readiness(
+                case, prepared_cases, reassess_readiness
             )
             agents = {}
             if assessment is None or assessment.status == "READY":
-                role_models = {
-                    role: selected_analysis_model if role in ANALYSIS_ROLES else model
-                    for role in ("readiness", "coverage", "generation", "repair", "review")
-                }
+                selected_analysis_model = resolve_analysis_model(provider, model, analysis_model)
+
+                def role_model(
+                    role: str,
+                    analysis: str = selected_analysis_model,
+                    implementation: str = model,
+                ):
+                    selected = analysis if role in ANALYSIS_ROLES else implementation
+                    return make_model(provider, selected)
+
                 agents = make_agents(
                     adapter,
-                    lambda role, role_models=role_models: make_model(provider, role_models[role]),
+                    role_model,
                     case.text,
                     include_readiness=assessment is None,
                 )
+            phase = "workflow"
             result = run_workflow(
                 case.text,
                 adapter,
@@ -126,75 +202,28 @@ def run_cases(
                     "changed_files": result.get("changed_files", []),
                 }
             )
-            if not case_succeeded(result):
+            if result.get("status") != "REVIEWED" and not (
+                skip_implemented and result.get("status") == "ALREADY_IMPLEMENTED"
+            ):
                 stopped = True
+            report["active_case_id"] = None
+            save_report()
+            if stopped:
                 break
+    except BaseException as error:
+        record_error(error, phase)
+        if not isinstance(error, Exception):
+            raise
     finally:
-        telemetry.close()
-
-    processed = [result["case_id"] for result in case_results]
-    complete = not stopped and len(processed) == len(case_ids)
-    report = {
-        "batch_status": "COMPLETED" if complete else "STOPPED",
-        "models": {
-            "analysis": selected_analysis_model,
-            "implementation": model,
-        },
-        "readiness_mode": (
-            "reassess"
-            if reassess_readiness
-            else "prepared"
-            if prepared_cases
-            else "reuse_or_assess"
-        ),
-        "requested_case_ids": case_ids,
-        "processed_case_ids": processed,
-        "remaining_case_ids": case_ids[len(processed) :],
-        "stopped_after": None if complete else processed[-1],
-        "cases": case_results,
-    }
-    report_path = output_dir / "result.json"
-    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+        if telemetry is not None:
+            try:
+                telemetry.close()
+            except Exception as error:
+                record_error(error, "telemetry_close")
+        complete = not stopped and len(case_results) == len(case_ids)
+        report["batch_status"] = "COMPLETED" if complete else "STOPPED"
+        save_report()
     return report, report_path
-
-
-def readiness_for_case(
-    case: CaseInput,
-    *,
-    prepared_cases: bool,
-    reassess_readiness: bool,
-) -> tuple[Assessment | None, str]:
-    """Reuse an explicit workbook status unless the caller requests reassessment."""
-    if reassess_readiness:
-        return None, "model_reassessment"
-    if case.readiness_status:
-        return (
-            Assessment(
-                status=case.readiness_status,
-                reason_and_evidence=(
-                    "Reused the exact readiness status from Case Summary.Automated Test."
-                ),
-                next_action_or_question=(
-                    "Continue to coverage preflight."
-                    if case.readiness_status == "READY"
-                    else "Reassess only when explicitly requested or the case changes."
-                ),
-            ),
-            "workbook_status",
-        )
-    if prepared_cases:
-        return (
-            Assessment(
-                status="READY",
-                reason_and_evidence=(
-                    "Prepared-case mode validated the selected case structure and non-empty "
-                    "required fields, then skipped a separate model readiness assessment."
-                ),
-                next_action_or_question="Continue to coverage preflight.",
-            ),
-            "prepared_preflight",
-        )
-    return None, "model"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -207,23 +236,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--analysis-model",
         help=(
-            "Readiness, coverage, and review model; defaults to claude-sonnet-5 for "
+            "Readiness and review model; defaults to claude-sonnet-5 for "
             "Anthropic and --model for OpenAI"
         ),
     )
-    parser.add_argument("--api-url", default="http://127.0.0.1:8080")
     readiness = parser.add_mutually_exclusive_group()
     readiness.add_argument(
         "--prepared-cases",
         action="store_true",
-        help=(
-            "Use deterministic structure validation instead of model readiness for statusless cases"
-        ),
+        help="Use deterministic structure validation when a case has no saved readiness status",
     )
     readiness.add_argument(
         "--reassess-readiness",
         action="store_true",
         help="Run model readiness even when the workbook already contains a status",
+    )
+    parser.add_argument(
+        "--skip-implemented",
+        action="store_true",
+        help="Skip unchanged tests that fully implement their assigned case, without a fresh run",
     )
     parser.add_argument(
         "--otel", action="store_true", help="Export traces using OTEL_* environment settings"
@@ -241,16 +272,16 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as error:
         parser.error(str(error))
     result, report_path = run_cases(
-        repository=repository,
-        case_path=case_path,
-        case_ids=args.case_id,
-        provider=args.provider,
-        model=args.model,
-        api_url=args.api_url,
+        repository,
+        case_path,
+        args.case_id,
+        args.provider,
+        args.model,
         export_otel=args.otel,
         analysis_model=args.analysis_model,
         prepared_cases=args.prepared_cases,
         reassess_readiness=args.reassess_readiness,
+        skip_implemented=args.skip_implemented,
     )
     print(
         json.dumps(

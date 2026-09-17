@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 # Statuses the host derives from execution evidence; an agent cannot claim them.
-EVIDENCE_STATUSES = frozenset({"VERIFIED", "FAILED", "NOT_VERIFIED"})
+EVIDENCE_STATUSES = frozenset({"VERIFIED", "FAILED", "VERIFICATION_INCOMPLETE"})
 
 
 class Assessment(BaseModel):
@@ -14,16 +14,10 @@ class Assessment(BaseModel):
     next_action_or_question: str
 
 
-class CoverageDecision(BaseModel):
-    status: Literal["GAP", "ALREADY_COVERED", "FAILED", "NOT_VERIFIED", "BLOCKED"]
-    target: str = ""
-    summary: str
-    case_id: str = ""
-    source_fingerprint: str = ""
-
-
 class Implementation(BaseModel):
-    status: Literal["VERIFIED", "FAILED", "NOT_VERIFIED", "BLOCKED"]
+    status: Literal[
+        "VERIFIED", "FAILED", "VERIFICATION_INCOMPLETE", "BLOCKED", "ALREADY_IMPLEMENTED"
+    ]
     target: str = ""
     summary: str
 
@@ -35,7 +29,7 @@ class RepairOutcome(BaseModel):
         "NEEDS_INVESTIGATION",
         "INFRASTRUCTURE_ISSUE",
         "EXHAUSTED",
-        "NOT_VERIFIED",
+        "VERIFICATION_INCOMPLETE",
     ]
     target: str
     summary: str

@@ -1,16 +1,15 @@
 # Evidence-backed API workflow with Strands
 
-This starter coordinates one or more complete API cases through readiness
-selection, coverage comparison, generation and fresh execution, conditional
-repair, and a read-only check against each original case. Cases run in the
-supplied order, with a fresh graph and repository adapter for each case. It uses
-the documents, skills, hook, Kotlin suite, and case workbook already installed
+This starter coordinates assigned API cases through readiness, generation and
+fresh exact execution, conditional repair, and a final check against each case.
+Cases run in the supplied order with a new graph and repository adapter per case.
+It uses the documents, skills, hook, Kotlin suite and workbook already installed
 in the practice repository.
 
-The starter supplies five roles and the deterministic repository adapter. Its
-graph connects readiness, coverage, generation, and conditional repair. The
-review agent is deliberately not registered as a graph node until the
-review-route practice is completed.
+The starter supplies four roles. Its graph connects readiness, generation and
+conditional repair. The review agent is deliberately not registered as a graph
+node until the review-route practice is completed. Until then, a passing test
+ends as `VERIFIED` with review still pending, and the batch stops at that case.
 
 ## Prerequisites
 
@@ -27,8 +26,8 @@ practice repository contains:
 - `test-cases/test-cases.xlsx`;
 - `scripts/protected-paths.txt`.
 
-Start the fake API using the instructions in `api-tests/README.md` before a
-live workflow run. Finish unrelated repair work first because the existing
+Start the fake API at `http://127.0.0.1:8080` using `api-tests/README.md`
+before a live workflow run. The workflow uses this fixed backend address. Finish unrelated repair work first because the existing
 repair hook owns its queue and attempt counters.
 
 ## Set up the Python environment
@@ -51,10 +50,9 @@ python3 -m venv .venv
 
 Set either `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in the current environment.
 Do not put a key in this repository. Select the matching provider and an
-available models explicitly when running `main.py`. The analysis model handles
-readiness, coverage, and the later review route. The implementation model is
-used only when coverage reports a real gap or an exact failing target enters
-repair. For Anthropic, both model configurations request `medium` effort.
+available model explicitly when running `main.py`. The analysis model handles
+readiness and the later review route. The implementation model identifies and
+automates the assigned test in generation, and handles conditional repair. For Anthropic, both model configurations request `medium` effort.
 
 ## How the application is assembled
 
@@ -73,20 +71,27 @@ of a successful run. The host application supplies those operations separately.
 | Agent | Instruction source | Supplied access |
 |---|---|---|
 | `readiness` | Existing readiness instructions | Read and search repository sources. |
-| `coverage` | Coverage preflight in `gen-api-test` through `AgentSkills` | Bind coverage to the selected case's assigned Allure ID, then run that equivalent existing test's exact target when found. |
-| `generation` | Remaining `gen-api-test` procedure through `AgentSkills` | Reuse a `GAP` handoff, plan, edit permitted API test layers, and run the selected API test method fresh. |
+| `generation` | `gen-api-test` through `AgentSkills` | Check the assigned ID, create or validate the plan before changes, implement the selected case and run its exact method. |
 | `repair` | `test-repair` through `AgentSkills` | Diagnose the selected target, use the existing queue, edit permitted test layers, and rerun that exact target. |
 | `review` | Case-check section of `automate-test-case` | Receive one host-prepared packet with the complete case, final test, helpers, optional plan, and exact-target evidence. It has no repository tools and may make at most two model calls. |
 
 Every role also receives the complete original case, `AGENTS.md`, and
-`agent_docs/AI_POLICY.md`. A generated status cannot replace the host's JUnit
-and Allure validation. Equivalent source coverage is reported as
-`ALREADY_COVERED` only when the test carries the selected case's assigned Allure
-ID, a matching exact-target run verifies it, and no source changed. A semantically
-similar test under another ID is an implementation reference and leaves the
-selected case as a `GAP`. A bare source-level coverage claim or evidence for
-another target is `NOT_VERIFIED`. An occupied assigned Allure ID without
-equivalent behavior is reported as `BLOCKED`.
+`agent_docs/AI_POLICY.md`. Generation implements the assigned case under its
+assigned Allure ID. It reuses and completes that case's existing method when
+needed. A test under another ID is only an implementation reference. An ID
+occupied by unrelated behavior or multiple methods produces `BLOCKED`.
+Coverage assessment is a separate request.
+
+For a repeated batch, pass `--skip-implemented` to skip fully implemented assigned
+cases. Before edits or execution, generation compares the existing test and its
+helpers with the complete case. If every requirement is implemented by an enabled
+test, it returns `ALREADY_IMPLEMENTED` with the target and requirement-to-source
+mapping. The host checks the unique assigned ID and unchanged source fingerprint.
+The semantic comparison remains the model's assessment. The case then ends
+without execution or final review, and the batch continues. This status does not
+claim a fresh passing run. Incomplete tests still require implementation and
+verification; without the flag, existing tests also require fresh execution.
+Missing, stale or mismatched execution proof produces `VERIFICATION_INCOMPLETE`.
 
 The supplied review invocation hook replaces graph task history with one
 `_review_packet` JSON message. The packet contains the full selected case; the
@@ -117,30 +122,30 @@ even when the workbook has a status. For a curated batch whose cases have
 already been prepared in the course workbook, pass `--prepared-cases`. This mode
 accepts XLSX input only. Statusless cases then use deterministic workbook shape
 checks plus non-empty values in the required selected-case fields, and continue
-to coverage without a separate readiness model call. Ordinary workbook loading
+to generation without a separate readiness model call. Ordinary workbook loading
 always checks the required sheets, columns, and one selected row per case, but
 the non-empty-field gate belongs only to prepared mode. This preflight is not a
 new semantic readiness opinion.
 
 ## State, evidence, and reports
 
-`state.py` defines the structured result of each operation. An equivalent test
-run, generation, or repair receives the selected `Class.method`, changed files,
-current diff, command log, JUnit counts, and Allure attachment evidence. A
-coverage `GAP` has no execution result to attach. Instead, the host binds that
-handoff to the selected case ID and a source fingerprint, then allows generation
-only while both still match and no workflow source change exists. A missing or
-stale handoff becomes `NOT_VERIFIED`.
+`state.py` defines the structured result of each operation. Generation and repair
+retain the selected exact target, changed files, current diff, command log and
+matching execution evidence. `workspace.py` restricts file access, `repository.py`
+integrates guarded execution, and `evidence.py` validates archived JUnit and Allure
+results against the selected target and current source fingerprint.
 
-Coverage executes an exact target only when it finds an equivalent existing
-test. This read-only coverage run skips Kotlin formatting so deduplication cannot
-change source. Generation and repair retain formatting because they may have
-edited permitted test layers. Generation runs only after coverage returns `GAP`, and it also executes
-only the exact selected `Class.method`. If either exact target fails, repair
-reruns the same method through the existing repair guard. The repair can
-complete only when the preceding stage established failure for that exact
-target and the post-repair run verifies the same target. The repository adapter
-always adds `--tests <package.Class.method>`; it exposes no broad-suite option.
+Generation and repair format the permitted API test layers before PRE and run
+only the selected `package.Class.method`. Repair starts only from a confirmed
+failure of that method and must verify the same target. A full regression suite
+is a separate request. Before each run, existing reports are archived; only fresh
+matching reports can verify the test. Previous unrelated results are preserved
+for the repair queue.
+
+`process_runner.py` uses an owned process group or Windows Job Object to stop
+timed-out processes. Unconfirmed cleanup leaves execution unverified. Source
+fingerprints include relevant new files and resources; generated backend logs
+do not invalidate a run.
 
 Each invocation writes a batch report to
 `.agent-state/qa-workflow/<run-id>/result.json`. Per-case stage reports and
@@ -152,10 +157,9 @@ selected readiness mode. Each per-case report records one of `model`,
 `model_reassessment`, `workbook_status`, or `prepared_preflight` as the
 readiness source. Reused and deterministic readiness also have a standalone
 `readiness.json`; they are recorded stages but are not counted as model graph
-execution. A case runs only after the preceding case finishes with `REVIEWED`, or with
-`ALREADY_COVERED` backed by unchanged source and matching verified exact-target
-evidence; any other status stops the batch before the next case can modify the
-same checkout. Each case keeps a separate plan at
+execution. A case runs only after the preceding case finishes with `REVIEWED`,
+or `ALREADY_IMPLEMENTED` when skipping was explicitly requested. Any other
+status stops the batch before the next case can modify the same checkout. Each case keeps a separate plan at
 `agent_docs/automation-plans/<case-id>.md`, so processing a later case does not
 replace an earlier case's plan. Each stage report contains its domain result plus
 duration, cycle count, model latency, token counts, cache counts when the
@@ -164,6 +168,8 @@ values. These metrics are selected directly from the Strands result; raw metric
 summaries, messages, tool arguments, and tool results are not serialized. The
 metrics are not added to the next agent's input. A graph status of `completed`
 means only that graph execution stopped normally.
+The batch report is saved before and after each case. Setup, execution and cleanup
+errors retain the completed cases, remaining order and failure details.
 
 After the review route is connected, each case directory also receives a
 `review-packet.json` containing the exact redacted model input. The private
@@ -237,7 +243,7 @@ worksheets with their standard columns: `Case ID`, `Title`, `Description`,
 Use `--reassess-readiness` for the full teaching readiness flow. Without either
 readiness flag, cases without a stored status run model readiness and cases with
 a status reuse it. For Anthropic, omitting `--analysis-model` still uses
-`claude-sonnet-5` for readiness, coverage, and review. For OpenAI, it keeps the
+`claude-sonnet-5` for readiness and review. For OpenAI, it keeps the
 older single-model behavior by using `--model` for every role unless an analysis
 model is supplied.
 
@@ -245,5 +251,5 @@ On macOS or Linux, use `./.venv/bin/python`, forward slashes, and shell line
 continuations. Inspect the batch `result.json`, each per-case result and stage
 file, and matching JUnit and Allure artifacts. If native OTLP tracing was
 enabled, use the trace backend for detailed chronology. Report source-only
-coverage, verified execution, repair outcomes, and review findings as distinct
+implementation decisions, verified execution, repair outcomes, and review findings as distinct
 results.
