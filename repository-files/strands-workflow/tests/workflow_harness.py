@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import sys
@@ -42,6 +43,9 @@ class OfflineModel(Model):
         raise AssertionError("The native structured-output tool must handle the result")
 
     async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs):
+        client = getattr(self, "client", None)
+        if client is not None and hasattr(client, "record_use"):
+            client.record_use()
         self.calls.append({"stage": self.stage, "messages": copy.deepcopy(messages)})
         if self.action:
             self.action()
@@ -139,6 +143,7 @@ class WorkflowHarness:
         self.closed_clients = []
         self.close_attempts = []
         self.close_errors = set()
+        self.model_clients = {}
         self.outputs: dict[str, BaseModel] = {
             "readiness": Assessment(
                 status="READY",
@@ -161,20 +166,38 @@ class WorkflowHarness:
 
     def run(self, *, initial_assessment=None, readiness_source="model"):
         agents = {}
+        self.model_clients = {}
         for stage, output in self.outputs.items():
             model = OfflineModel(stage, output, self.calls, self.actions.get(stage))
 
             class Client:
                 def __init__(client_self, name):
                     client_self.name = name
+                    client_self.use_loop = None
+                    client_self.close_loop = None
+                    client_self.close_calls = 0
+                    client_self.closed_while_loop_open = False
+
+                def record_use(client_self):
+                    client_self.use_loop = asyncio.get_running_loop()
 
                 async def close(client_self):
+                    client_self.close_calls += 1
+                    client_self.close_loop = asyncio.get_running_loop()
+                    client_self.closed_while_loop_open = not client_self.close_loop.is_closed()
                     self.close_attempts.append(client_self.name)
                     if client_self.name in self.close_errors:
                         raise RuntimeError(f"Synthetic close failure for {client_self.name}")
+                    if (
+                        client_self.use_loop is not None
+                        and client_self.close_loop is not client_self.use_loop
+                    ):
+                        raise RuntimeError("Client cleanup ran on a different event loop")
                     self.closed_clients.append(client_self.name)
 
-            model.client = Client(stage)
+            client = Client(stage)
+            model.client = client
+            self.model_clients[stage] = client
             agents[stage] = Agent(
                 model=model,
                 agent_id=stage,

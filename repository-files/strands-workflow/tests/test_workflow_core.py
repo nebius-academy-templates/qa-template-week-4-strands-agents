@@ -322,7 +322,7 @@ def test_stage_reports_include_only_safe_metric_aggregates(harness):
 
 
 def test_provider_clients_close_inside_graph_invocation(harness):
-    harness.run()
+    result = harness.run()
 
     assert set(harness.closed_clients) == {
         "readiness",
@@ -331,6 +331,11 @@ def test_provider_clients_close_inside_graph_invocation(harness):
         "repair",
         "review",
     }
+    assert all(client.close_calls == 1 for client in harness.model_clients.values())
+    assert all(client.closed_while_loop_open for client in harness.model_clients.values())
+    for stage in result["execution_order"]:
+        client = harness.model_clients[stage]
+        assert client.use_loop is client.close_loop
 
 
 @pytest.mark.parametrize("mode", ["failed_branch", "model_exception"])
@@ -351,6 +356,10 @@ def test_provider_clients_close_when_workflow_does_not_succeed(harness, mode):
         "repair",
         "review",
     }
+    assert all(client.close_calls == 1 for client in harness.model_clients.values())
+    assert all(client.closed_while_loop_open for client in harness.model_clients.values())
+    readiness_client = harness.model_clients["readiness"]
+    assert readiness_client.use_loop is readiness_client.close_loop
 
 
 def test_one_client_close_error_does_not_skip_other_clients_or_change_result(harness):
