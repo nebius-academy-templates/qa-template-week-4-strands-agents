@@ -75,7 +75,7 @@ of a successful run. The host application supplies those operations separately.
 | Agent | Instruction source | Supplied access |
 |---|---|---|
 | `readiness` | Existing readiness instructions | Read and search repository sources. |
-| `coverage` | Coverage preflight in `gen-api-test` through `AgentSkills` | Read and search source, then run an equivalent existing test's exact target when found. |
+| `coverage` | Coverage preflight in `gen-api-test` through `AgentSkills` | Bind coverage to the selected case's assigned Allure ID, then run that equivalent existing test's exact target when found. |
 | `generation` | Remaining `gen-api-test` procedure through `AgentSkills` | Reuse a `GAP` handoff, plan, edit permitted API test layers, and run the selected API test method fresh. |
 | `repair` | `test-repair` through `AgentSkills` | Diagnose the selected target, use the existing queue, edit permitted test layers, and rerun that exact target. |
 | `review` | Case-check section of `automate-test-case` | Receive one host-prepared packet with the complete case, final test, helpers, optional plan, and exact-target evidence. It has no repository tools and may make at most two model calls. |
@@ -83,10 +83,12 @@ of a successful run. The host application supplies those operations separately.
 Every role also receives the complete original case, `AGENTS.md`, and
 `agent_docs/AI_POLICY.md`. A generated status cannot replace the host's JUnit
 and Allure validation. Equivalent source coverage is reported as
-`ALREADY_COVERED` only when a matching exact-target run verifies the existing
-test and no source changed. A bare source-level coverage claim or evidence for
-another target is `NOT_VERIFIED`. An occupied Allure ID without equivalent
-behavior is reported as `BLOCKED`.
+`ALREADY_COVERED` only when the test carries the selected case's assigned Allure
+ID, a matching exact-target run verifies it, and no source changed. A semantically
+similar test under another ID is an implementation reference and leaves the
+selected case as a `GAP`. A bare source-level coverage claim or evidence for
+another target is `NOT_VERIFIED`. An occupied assigned Allure ID without
+equivalent behavior is reported as `BLOCKED`.
 
 The supplied review invocation hook replaces graph task history with one
 `_review_packet` JSON message. The packet contains the full selected case; the
@@ -145,7 +147,9 @@ always adds `--tests <package.Class.method>`; it exposes no broad-suite option.
 Each invocation writes a batch report to
 `.agent-state/qa-workflow/<run-id>/result.json`. Per-case stage reports and
 results are stored under `cases/001-<case-id>/`, `cases/002-<case-id>/`, and so
-on. The batch report records the analysis and implementation models and the
+on. Each per-case report contains a terminal `next_action` computed from its
+final status, and the batch copies that action into the corresponding case
+entry. The batch report records the analysis and implementation models and the
 selected readiness mode. Each per-case report records one of `model`,
 `model_reassessment`, `workbook_status`, or `prepared_preflight` as the
 readiness source. Reused and deterministic readiness also have a standalone

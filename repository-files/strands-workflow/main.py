@@ -36,7 +36,7 @@ def case_succeeded(result: dict) -> bool:
     if result.get("status") == "REVIEWED":
         return True
     stages = result.get("stages", {})
-    coverage = stages.get("coverage", stages.get("generation", {}))
+    coverage = stages.get("coverage", {})
     return (
         result.get("status") == "ALREADY_COVERED"
         and result.get("changed_files") == []
@@ -121,6 +121,7 @@ def run_cases(
                 {
                     "case_id": case_id,
                     "status": result["status"],
+                    "next_action": result["next_action"],
                     "report": (case_output / "result.json").relative_to(output_dir).as_posix(),
                     "changed_files": result.get("changed_files", []),
                 }

@@ -111,6 +111,7 @@ def install_runtime_stubs(monkeypatch, outcomes: dict[str, str | dict]):
                         "stages": {"coverage": {"target": target}},
                     }
                 )
+        result.setdefault("next_action", f"Next action for {result['status']}.")
         repository.output_dir.mkdir(parents=True)
         (repository.output_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
         return result
@@ -404,6 +405,10 @@ def test_batch_runs_cases_in_order_with_fresh_state_and_separate_reports(tmp_pat
         "REVIEWED",
         "ALREADY_COVERED",
     ]
+    assert [item["next_action"] for item in report["cases"]] == [
+        "Next action for REVIEWED.",
+        "Next action for ALREADY_COVERED.",
+    ]
     assert [item["report"] for item in report["cases"]] == [
         "cases/001-API-1001/result.json",
         "cases/002-API-1002/result.json",
@@ -593,6 +598,15 @@ def test_already_covered_requires_unchanged_source_and_matching_target_evidence(
             {
                 **result,
                 "evidence": {**result["evidence"], "target": "tests.OtherTest.testCase"},
+            }
+        )
+        is False
+    )
+    assert (
+        entry.case_succeeded(
+            {
+                **result,
+                "stages": {"generation": {"target": target}},
             }
         )
         is False

@@ -53,6 +53,57 @@ def validated_gap_handoff(output: dict, repository) -> bool:
     )
 
 
+def _normalize_coverage_identity(output: dict, repository) -> dict:
+    """Derive the coverage route from the selected case's assigned Allure ID."""
+    identity = repository.coverage_identity(output.get("target", ""))
+    if not identity["case_targets"]:
+        return {
+            **output,
+            "status": "GAP",
+            "target": "",
+            "summary": (
+                f'No test with @AllureId("{identity["expected_allure_id"]}") covers the '
+                "selected case; a target under another ID cannot satisfy this case identity"
+            ),
+        }
+    if identity["matches_case_id"] and output.get("status") != "GAP":
+        return output
+    targets = ", ".join(identity["case_targets"])
+    return {
+        **output,
+        "status": "BLOCKED",
+        "target": targets if len(identity["case_targets"]) == 1 else "",
+        "summary": (
+            f'@AllureId("{identity["expected_allure_id"]}") is occupied by {targets}, '
+            "so generation cannot create another test for the selected case"
+        ),
+    }
+
+
+def _final_next_action(status: str, target: str = "") -> str:
+    selected = target or "the selected target"
+    actions = {
+        "REVIEWED": "No further workflow action is required for this case.",
+        "ALREADY_COVERED": f"Reuse {selected}; do not generate a duplicate test.",
+        "VERIFIED": f"Run the final case-conformance review for {selected}.",
+        "CHANGES_REQUESTED": (
+            f"Correct the review findings for {selected}, rerun it, and review it again."
+        ),
+        "GAP": "Generate and execute a test with the selected case's assigned Allure ID.",
+        "FAILED": f"Repair {selected} using its current exact-target evidence.",
+        "BLOCKED": "Resolve the reported blocker before continuing.",
+        "NEEDS_CLARIFICATION": "Answer the reported readiness question before continuing.",
+        "NOT_VERIFIED": (
+            "Obtain current exact-target execution evidence before treating this case as complete."
+        ),
+        "PRODUCT_BUG": "Report the product defect and keep the test expectation unchanged.",
+        "NEEDS_INVESTIGATION": "Collect the missing evidence before continuing.",
+        "INFRASTRUCTURE_ISSUE": "Restore the test infrastructure and rerun the exact target.",
+        "EXHAUSTED": "Stop automatic repair and inspect the retained evidence.",
+    }
+    return actions.get(status, "Inspect the final stage result before continuing.")
+
+
 async def _close_model_clients(agents: dict) -> None:
     """Close every distinct provider client without hiding the workflow result."""
     seen: set[int] = set()
@@ -120,7 +171,11 @@ def build_graph(agents: dict, repository, *, include_readiness: bool = True):
         if getattr(result, "structured_output", None) is None:
             return
         output = result.structured_output.model_dump()
-        if event.node_id == "coverage" and output.get("status") == "GAP":
+        if event.node_id == "coverage":
+            output = _normalize_coverage_identity(output, repository)
+        if event.node_id == "readiness" and output.get("status") == "READY":
+            output["next_action_or_question"] = "Continue to the coverage preflight."
+        elif event.node_id == "coverage" and output.get("status") == "GAP":
             current_fingerprint = repository.source_fingerprint()
             if (
                 not coverage_start_fingerprint
@@ -222,6 +277,8 @@ def run_workflow(
     initial_stage = None
     if initial_assessment is not None:
         initial_stage = {**initial_assessment.model_dump(), "source": readiness_source}
+        if initial_stage["status"] == "READY":
+            initial_stage["next_action_or_question"] = "Continue to the coverage preflight."
         (repository.output_dir / "readiness.json").write_text(
             json.dumps(initial_stage, indent=2, ensure_ascii=False), encoding="utf-8"
         )
@@ -236,6 +293,7 @@ def run_workflow(
                 "evidence": repository.current_evidence(),
                 "stages": {"readiness": initial_stage},
                 "readiness_source": readiness_source,
+                "next_action": _final_next_action(initial_assessment.status),
             }
             path = repository.output_dir / "result.json"
             path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -308,6 +366,7 @@ def run_workflow(
         "evidence": evidence,
         "stages": stages,
         "readiness_source": readiness_source,
+        "next_action": _final_next_action(status, final_target),
     }
     if blocking_reason:
         report["blocking_reason"] = blocking_reason

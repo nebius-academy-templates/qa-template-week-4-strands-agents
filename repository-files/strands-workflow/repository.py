@@ -408,6 +408,26 @@ class Repository:
             inventory.extend(found)
         return inventory
 
+    def coverage_identity(self, target: str) -> dict:
+        """Bind source coverage to the selected case's assigned Allure ID."""
+        expected_allure_id = self.case_id.removeprefix("API-")
+        inventory = self._inventory()
+        matching_target = [item for item in inventory if item["target"] == target]
+        case_targets = [
+            item["target"] for item in inventory if item["allure_id"] == expected_allure_id
+        ]
+        target_allure_id = matching_target[0]["allure_id"] if len(matching_target) == 1 else ""
+        return {
+            "case_id": self.case_id,
+            "expected_allure_id": expected_allure_id,
+            "target": target,
+            "target_allure_id": target_allure_id,
+            "case_targets": case_targets,
+            "matches_case_id": case_targets == [target]
+            and len(matching_target) == 1
+            and target_allure_id == expected_allure_id,
+        }
+
     @staticmethod
     def _junit_status(case) -> str:
         outcomes = {

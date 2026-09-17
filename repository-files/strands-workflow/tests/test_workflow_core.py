@@ -7,12 +7,13 @@ import sys
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from state import Assessment, CoverageDecision  # noqa: E402
+from state import Assessment, CoverageDecision, Implementation  # noqa: E402
 from workflow import validated_gap_handoff  # noqa: E402
 from workflow_harness import TARGET, TEST_PATH, WorkflowHarness  # noqa: E402
 
@@ -34,6 +35,15 @@ def harness(tmp_path):
     return WorkflowHarness(tmp_path)
 
 
+def test_generation_schema_rejects_coverage_only_status():
+    with pytest.raises(ValidationError):
+        Implementation(
+            status="ALREADY_COVERED",
+            target=TARGET,
+            summary="Coverage decisions belong to the coverage stage.",
+        )
+
+
 @pytest.mark.parametrize("status", ["BLOCKED", "NEEDS_CLARIFICATION"])
 def test_nonready_case_never_invokes_later_stages(harness, status):
     harness.outputs["readiness"].status = status
@@ -45,6 +55,13 @@ def test_nonready_case_never_invokes_later_stages(harness, status):
     assert result["execution_order"] == ["readiness"]
     assert harness.repository.last_run is None
     assert not harness.repository.changed_files
+    assert (
+        result["next_action"]
+        == {
+            "BLOCKED": "Resolve the reported blocker before continuing.",
+            "NEEDS_CLARIFICATION": "Answer the reported readiness question before continuing.",
+        }[status]
+    )
 
 
 def test_verified_model_claim_without_execution_evidence_stops(harness):
@@ -61,9 +78,16 @@ def test_gap_handoff_is_bound_to_case_and_sources_without_execution_evidence(har
     result = harness.run()
 
     coverage = result["stages"]["coverage"]
+    assert (
+        result["stages"]["readiness"]["next_action_or_question"]
+        == "Continue to the coverage preflight."
+    )
     assert coverage["case_id"] == harness.repository.case_id
     assert coverage["source_fingerprint"] == "original-source"
     assert "evidence" not in coverage
+    assert result["next_action"] == (
+        "Run the final case-conformance review for tests.ExampleTest.testExample."
+    )
 
 
 def test_source_change_during_coverage_invalidates_gap_before_generation(harness):
@@ -151,6 +175,7 @@ def test_repair_evidence_for_another_target_cannot_complete_the_case(harness):
 
 
 def test_coverage_id_conflict_stops_as_blocked(harness):
+    harness.repository.coverage_targets = {TARGET: "9001"}
     harness.outputs["coverage"] = CoverageDecision(
         status="BLOCKED",
         target=TARGET,
@@ -163,6 +188,39 @@ def test_coverage_id_conflict_stops_as_blocked(harness):
     assert harness.called_stages == ["readiness", "coverage"]
     assert result["changed_files"] == []
     assert result["evidence"]["status"] == "NOT_VERIFIED"
+
+
+@pytest.mark.parametrize(
+    "coverage_status", ["GAP", "ALREADY_COVERED", "BLOCKED", "NOT_VERIFIED", "FAILED"]
+)
+def test_other_case_id_semantic_match_routes_generation(harness, coverage_status):
+    legacy_target = "tests.LocationApiTest.testResolveCurrentLocation"
+    harness.repository.coverage_targets = {legacy_target: "2090"}
+    harness.outputs["coverage"] = CoverageDecision(
+        status=coverage_status,
+        target=legacy_target,
+        summary="The other case has semantically equivalent behavior.",
+    )
+
+    result = harness.run()
+
+    assert harness.called_stages == ["readiness", "coverage", "generation"]
+    assert result["stages"]["coverage"]["status"] == "GAP"
+    assert result["stages"]["coverage"]["target"] == ""
+    assert "cannot satisfy this case identity" in result["stages"]["coverage"]["summary"]
+    assert result["status"] == "VERIFIED"
+
+
+def test_gap_with_occupied_selected_id_is_blocked_by_host(harness):
+    harness.repository.coverage_targets = {TARGET: "9001"}
+
+    result = harness.run()
+
+    assert harness.called_stages == ["readiness", "coverage"]
+    assert result["status"] == "BLOCKED"
+    assert result["stages"]["coverage"]["target"] == TARGET
+    assert "generation cannot create another test" in result["stages"]["coverage"]["summary"]
+    assert result["next_action"] == "Resolve the reported blocker before continuing."
 
 
 def test_product_bug_from_repair_ends_without_another_stage(harness):
@@ -181,6 +239,7 @@ def test_product_bug_from_repair_ends_without_another_stage(harness):
 
 
 def test_already_covered_without_execution_evidence_is_not_success(harness):
+    harness.repository.coverage_targets = {TARGET: "9001"}
     harness.outputs["coverage"] = CoverageDecision(
         status="ALREADY_COVERED",
         target=TARGET,
@@ -198,6 +257,7 @@ def test_already_covered_without_execution_evidence_is_not_success(harness):
 
 
 def test_already_covered_with_matching_exact_target_evidence_is_success(harness):
+    harness.repository.coverage_targets = {TARGET: "9001"}
     harness.outputs["coverage"] = CoverageDecision(
         status="ALREADY_COVERED",
         target=TARGET,
@@ -218,6 +278,7 @@ def test_already_covered_with_matching_exact_target_evidence_is_success(harness)
 
 
 def test_equivalent_existing_test_failure_uses_the_same_repair_route(harness):
+    harness.repository.coverage_targets = {TARGET: "9001"}
     harness.outputs["coverage"] = CoverageDecision(
         status="ALREADY_COVERED",
         target=TARGET,
@@ -240,6 +301,7 @@ def test_equivalent_existing_test_failure_uses_the_same_repair_route(harness):
 
 
 def test_already_covered_rejects_wrong_target_evidence(harness):
+    harness.repository.coverage_targets = {TARGET: "9001"}
     harness.outputs["coverage"] = CoverageDecision(
         status="ALREADY_COVERED",
         target=TARGET,
@@ -259,6 +321,7 @@ def test_already_covered_rejects_wrong_target_evidence(harness):
 
 
 def test_already_covered_claim_with_source_changes_is_not_verified(harness):
+    harness.repository.coverage_targets = {TARGET: "9001"}
     harness.outputs["coverage"] = CoverageDecision(
         status="ALREADY_COVERED", target=TARGET, summary="The scenario already has a source test."
     )
@@ -388,7 +451,7 @@ def test_cached_ready_status_skips_model_readiness(harness):
     assessment = Assessment(
         status="READY",
         reason_and_evidence="Reused workbook status.",
-        next_action_or_question="Continue to coverage preflight.",
+        next_action_or_question="Generate a test or reuse an equivalent test.",
     )
 
     result = harness.run(initial_assessment=assessment, readiness_source="workbook_status")
@@ -396,6 +459,10 @@ def test_cached_ready_status_skips_model_readiness(harness):
     assert harness.called_stages == ["coverage", "generation"]
     assert result["execution_order"] == ["coverage", "generation"]
     assert result["stages"]["readiness"]["source"] == "workbook_status"
+    assert (
+        result["stages"]["readiness"]["next_action_or_question"]
+        == "Continue to the coverage preflight."
+    )
     assert (harness.repository.output_dir / "readiness.json").is_file()
 
 
@@ -420,4 +487,11 @@ def test_cached_nonready_status_stops_without_any_model_call(harness, status):
     assert result["status"] == status
     assert result["graph_status"] == "skipped"
     assert result["execution_order"] == []
+    assert (
+        result["next_action"]
+        == {
+            "BLOCKED": "Resolve the reported blocker before continuing.",
+            "NEEDS_CLARIFICATION": "Answer the reported readiness question before continuing.",
+        }[status]
+    )
     assert (harness.repository.output_dir / "readiness.json").is_file()

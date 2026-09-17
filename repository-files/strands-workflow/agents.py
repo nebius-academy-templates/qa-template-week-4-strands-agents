@@ -254,14 +254,18 @@ that saved result replaces the procedure's task-automation-readiness.md output.
 preflight for the complete supplied case. Search the existing API tests and compare
 all preconditions, actions, expected results and resulting state. Do not create a
 plan, edit a file or implement a test.
-Return GAP only when no equivalent test and no Allure ID conflict exists. When an
-existing test is equivalent, establish current execution evidence for its exact
-package.Class.method: reuse matching current evidence or call run_coverage_test. Return
-ALREADY_COVERED only when both status and target_status are VERIFIED. Return FAILED
-only when that exact target has target_status FAILED. Return NOT_VERIFIED for other
-missing or mismatched execution evidence. An occupied Allure ID without equivalent
-behavior is BLOCKED, not covered. Include the exact target when one exists and
-summarize the comparison or conflict in CoverageDecision.
+Coverage for the selected case is bound to its assigned Allure ID. If no target
+has that exact ID, return GAP even when a test under another ID has semantically
+equivalent behavior; that other test is only an implementation reference. Do not
+plan, edit or run Gradle for this GAP. If the assigned ID is occupied by
+non-equivalent behavior, return BLOCKED and explain the conflict. If the exact-ID
+target is equivalent, establish current execution evidence for its exact
+package.Class.method: reuse matching current evidence or call run_coverage_test.
+Return ALREADY_COVERED only when both status and target_status are VERIFIED.
+Return FAILED only when that exact target has target_status FAILED. Return
+NOT_VERIFIED for other missing or mismatched execution evidence. Include the
+exact target when one exists and summarize the comparison or conflict in
+CoverageDecision.
 """,
                 [*sources, execution_evidence, run_coverage_test],
                 CoverageDecision,
@@ -271,8 +275,9 @@ summarize the comparison or conflict in CoverageDecision.
                 "generation",
                 f"""Activate gen-api-test with the skills tool. The host validated the preceding
 coverage node's GAP handoff for this case and current source fingerprint. Begin
-with the plan and do not repeat coverage. If current evidence contradicts that
-handoff, stop with BLOCKED instead of generating a duplicate test.
+with the plan and do not repeat coverage. If the assigned Allure ID became
+occupied after that handoff, stop with BLOCKED. A similar test under another ID
+is only an implementation reference and does not invalidate the GAP.
 Use run_api_test for verification; it runs only the supplied case's exact
 Class.method. Both status and target_status describe that exact execution. In this
 host, the skill's plan template is

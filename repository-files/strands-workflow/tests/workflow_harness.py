@@ -75,6 +75,7 @@ class RepositoryStub:
         self.current_diff = ""
         self.evidence_reads = 0
         self.on_evidence_read = None
+        self.coverage_targets = {}
 
     def source_fingerprint(self):
         return self.source_revision
@@ -95,6 +96,23 @@ class RepositoryStub:
 
     def diff(self):
         return self.current_diff
+
+    def coverage_identity(self, target):
+        expected_allure_id = self.case_id.removeprefix("API-")
+        case_targets = [
+            name
+            for name, allure_id in self.coverage_targets.items()
+            if allure_id == expected_allure_id
+        ]
+        target_allure_id = self.coverage_targets.get(target, "")
+        return {
+            "case_id": self.case_id,
+            "expected_allure_id": expected_allure_id,
+            "target": target,
+            "target_allure_id": target_allure_id,
+            "case_targets": case_targets,
+            "matches_case_id": case_targets == [target] and target_allure_id == expected_allure_id,
+        }
 
     def prepare_review_packet(self, case, target):
         evidence = self.current_evidence()

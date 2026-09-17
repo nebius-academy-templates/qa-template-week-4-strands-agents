@@ -300,6 +300,27 @@ class RepositoryTests(unittest.TestCase):
             self.repo.run_api_test(TARGET)
         process.assert_not_called()
 
+    def test_coverage_identity_requires_the_selected_case_allure_id(self):
+        selected = self.repo.coverage_identity(TARGET)
+        self.assertTrue(selected["matches_case_id"])
+        self.assertEqual(selected["case_targets"], [TARGET])
+
+        legacy_path = self.root / "api-tests/src/test/kotlin/tests/LocationApiTest.kt"
+        legacy_path.write_text(
+            SOURCE.replace("SampleApiTest", "LocationApiTest")
+            .replace("testScenario", "testResolveCurrentLocation")
+            .replace('"9001"', '"2090"'),
+            encoding="utf-8",
+        )
+        legacy_target = "tests.LocationApiTest.testResolveCurrentLocation"
+        self.repo.case_id = "API-3010"
+
+        other_case = self.repo.coverage_identity(legacy_target)
+
+        self.assertEqual(other_case["target_allure_id"], "2090")
+        self.assertEqual(other_case["case_targets"], [])
+        self.assertFalse(other_case["matches_case_id"])
+
     def test_target_failure_skip_and_mismatch_remain_distinct(self):
         for status, skip, target, expected in [
             ("failed", False, TARGET, "FAILED"),

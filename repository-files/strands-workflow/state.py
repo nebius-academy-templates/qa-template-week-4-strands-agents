@@ -23,7 +23,7 @@ class CoverageDecision(BaseModel):
 
 
 class Implementation(BaseModel):
-    status: Literal["VERIFIED", "ALREADY_COVERED", "FAILED", "NOT_VERIFIED", "BLOCKED"]
+    status: Literal["VERIFIED", "FAILED", "NOT_VERIFIED", "BLOCKED"]
     target: str = ""
     summary: str
 
