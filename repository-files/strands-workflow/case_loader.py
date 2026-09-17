@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from openpyxl import load_workbook
@@ -12,10 +13,54 @@ TEXT_SUFFIXES = frozenset({".md", ".txt"})
 SUPPORTED_SUFFIXES = frozenset({".xlsx", *TEXT_SUFFIXES})
 WORKBOOK_SHEETS = ("Case Summary", "Steps")
 CASE_ID_HEADER = "Case ID"
+READINESS_HEADER = "Automated Test"
+READINESS_STATUSES = {
+    "READY FOR AUTOMATION": "READY",
+    "BLOCKED": "BLOCKED",
+    "NEEDS_CLARIFICATION": "NEEDS_CLARIFICATION",
+}
 REQUIRED_COLUMNS = {
     "Case Summary": (CASE_ID_HEADER, "Title", "Description", "Preconditions"),
     "Steps": (CASE_ID_HEADER, "Actions", "Expected Results"),
 }
+
+
+@dataclass(frozen=True)
+class CaseInput:
+    case_id: str
+    text: str
+    readiness_status: str | None = None
+
+    def __iter__(self):
+        """Keep two-value unpacking compatible with the earlier loader API."""
+        yield self.case_id
+        yield self.text
+
+    def __getitem__(self, index: int) -> str:
+        """Keep positional reads compatible with the earlier tuple result."""
+        return (self.case_id, self.text)[index]
+
+
+def validate_prepared_case(case: CaseInput) -> None:
+    """Require values in every field needed by the deterministic batch preflight."""
+    if not case.text.startswith("## Case Summary\n"):
+        return
+    issues = []
+    for sheet_name in WORKBOOK_SHEETS:
+        marker = f"## {sheet_name}\n"
+        section = case.text.split(marker, 1)[1].split("\n\n## ", 1)[0]
+        payload = json.loads(section)
+        headers = payload["headers"]
+        row = payload["rows"][0]
+        for column in REQUIRED_COLUMNS[sheet_name]:
+            index = headers.index(column)
+            value = row[index] if index < len(row) else ""
+            if not _as_text(value):
+                issues.append(f"{sheet_name}.{column}")
+    if issues:
+        raise ValueError(
+            f"Prepared case {case.case_id} has empty required field(s): {', '.join(issues)}"
+        )
 
 
 def _as_text(value: object) -> str:
@@ -26,7 +71,7 @@ def _contains_case_id(text: str, case_id: str) -> bool:
     return re.search(rf"(?<![A-Za-z0-9]){re.escape(case_id)}(?![A-Za-z0-9])", text) is not None
 
 
-def _read_text_case(path: Path, case_ids: list[str]) -> list[tuple[str, str]]:
+def _read_text_case(path: Path, case_ids: list[str]) -> list[CaseInput]:
     if len(case_ids) != 1:
         raise ValueError("A Markdown or text case file requires exactly one case ID")
 
@@ -36,7 +81,7 @@ def _read_text_case(path: Path, case_ids: list[str]) -> list[tuple[str, str]]:
         raise ValueError("The supplied case file is empty")
     if not _contains_case_id(text, case_id):
         raise ValueError(f"The supplied text does not explicitly identify {case_id}")
-    return [(case_id, text)]
+    return [CaseInput(case_id=case_id, text=text)]
 
 
 def _rows_by_case(sheet, case_ids: list[str]) -> tuple[list[str], dict[str, list[list[str]]]]:
@@ -66,7 +111,7 @@ def _rows_by_case(sheet, case_ids: list[str]) -> tuple[list[str], dict[str, list
     return headers, selected
 
 
-def _read_workbook_cases(path: Path, case_ids: list[str]) -> list[tuple[str, str]]:
+def _read_workbook_cases(path: Path, case_ids: list[str]) -> list[CaseInput]:
     workbook = load_workbook(path, read_only=True, data_only=True)
     try:
         missing_sheets = [name for name in WORKBOOK_SHEETS if name not in workbook.sheetnames]
@@ -75,6 +120,7 @@ def _read_workbook_cases(path: Path, case_ids: list[str]) -> list[tuple[str, str
             raise ValueError(f"The workbook is missing required worksheet(s): {names}")
 
         sections = {case_id: [] for case_id in case_ids}
+        readiness = {case_id: None for case_id in case_ids}
         errors = []
         for sheet_name in WORKBOOK_SHEETS:
             headers, selected = _rows_by_case(workbook[sheet_name], case_ids)
@@ -89,15 +135,26 @@ def _read_workbook_cases(path: Path, case_ids: list[str]) -> list[tuple[str, str
                     f"## {sheet_name}\n"
                     + json.dumps({"headers": headers, "rows": rows}, ensure_ascii=False)
                 )
+                if sheet_name == "Case Summary" and len(rows) == 1 and READINESS_HEADER in headers:
+                    status_index = headers.index(READINESS_HEADER)
+                    value = rows[0][status_index] if status_index < len(rows[0]) else ""
+                    readiness[case_id] = READINESS_STATUSES.get(value)
 
         if errors:
             raise ValueError("; ".join(errors))
-        return [(case_id, "\n\n".join(sections[case_id])) for case_id in case_ids]
+        return [
+            CaseInput(
+                case_id=case_id,
+                text="\n\n".join(sections[case_id]),
+                readiness_status=readiness[case_id],
+            )
+            for case_id in case_ids
+        ]
     finally:
         workbook.close()
 
 
-def read_cases(path: Path, case_ids: list[str]) -> list[tuple[str, str]]:
+def read_cases(path: Path, case_ids: list[str]) -> list[CaseInput]:
     """Load every selected case once and preserve the caller's ID order."""
     if not case_ids:
         raise ValueError("At least one case ID is required")

@@ -12,7 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from state import Implementation  # noqa: E402
+from state import Assessment, CoverageDecision  # noqa: E402
+from workflow import validated_gap_handoff  # noqa: E402
 from workflow_harness import TARGET, TEST_PATH, WorkflowHarness  # noqa: E402
 
 
@@ -53,7 +54,44 @@ def test_verified_model_claim_without_execution_evidence_stops(harness):
 
     assert result["status"] == "NOT_VERIFIED"
     assert result["stages"]["generation"]["status"] == "NOT_VERIFIED"
-    assert harness.called_stages == ["readiness", "generation"]
+    assert harness.called_stages == ["readiness", "coverage", "generation"]
+
+
+def test_gap_handoff_is_bound_to_case_and_sources_without_execution_evidence(harness):
+    result = harness.run()
+
+    coverage = result["stages"]["coverage"]
+    assert coverage["case_id"] == harness.repository.case_id
+    assert coverage["source_fingerprint"] == "original-source"
+    assert "evidence" not in coverage
+
+
+def test_source_change_during_coverage_invalidates_gap_before_generation(harness):
+    def change_source():
+        harness.repository.source_revision = "changed-during-coverage"
+        harness.repository.changed_files.add(TEST_PATH)
+
+    harness.actions["coverage"] = change_source
+
+    result = harness.run()
+
+    assert harness.called_stages == ["readiness", "coverage"]
+    assert result["status"] == "NOT_VERIFIED"
+    assert result["stages"]["coverage"]["status"] == "NOT_VERIFIED"
+
+
+def test_gap_handoff_requires_case_and_current_fingerprint(harness):
+    valid = {
+        "status": "GAP",
+        "case_id": harness.repository.case_id,
+        "source_fingerprint": harness.repository.source_fingerprint(),
+    }
+
+    assert validated_gap_handoff(valid, harness.repository) is True
+    assert validated_gap_handoff({**valid, "case_id": "API-9999"}, harness.repository) is False
+    assert validated_gap_handoff({**valid, "source_fingerprint": ""}, harness.repository) is False
+    harness.repository.source_revision = "new-source"
+    assert validated_gap_handoff(valid, harness.repository) is False
 
 
 def test_generation_evidence_for_another_target_stops_before_repair(harness):
@@ -66,7 +104,7 @@ def test_generation_evidence_for_another_target_stops_before_repair(harness):
     result = harness.run()
 
     assert result["status"] == "NOT_VERIFIED"
-    assert harness.called_stages == ["readiness", "generation"]
+    assert harness.called_stages == ["readiness", "coverage", "generation"]
     assert result["stages"]["generation"]["target"] == TARGET
     assert result["stages"]["generation"]["evidence"]["target"] == wrong_target
     assert "does not match" in result["stages"]["generation"]["summary"]
@@ -82,7 +120,7 @@ def test_verified_exact_repair_completes_the_starter_route(harness):
 
     result = harness.run()
 
-    assert harness.called_stages == ["readiness", "generation", "repair"]
+    assert harness.called_stages == ["readiness", "coverage", "generation", "repair"]
     assert result["stages"]["repair"]["status"] == "VERIFIED"
     assert result["status"] == "VERIFIED"
     assert result["stages"]["generation"]["evidence"]["target_status"] == "FAILED"
@@ -103,7 +141,7 @@ def test_repair_evidence_for_another_target_cannot_complete_the_case(harness):
 
     result = harness.run()
 
-    assert harness.called_stages == ["readiness", "generation", "repair"]
+    assert harness.called_stages == ["readiness", "coverage", "generation", "repair"]
     assert result["status"] == "NOT_VERIFIED"
     assert result["stages"]["generation"]["target"] == TARGET
     assert result["stages"]["repair"]["target"] == TARGET
@@ -112,18 +150,17 @@ def test_repair_evidence_for_another_target_cannot_complete_the_case(harness):
     assert "does not match the selected target" in result["stages"]["repair"]["summary"]
 
 
-def test_generation_id_conflict_stops_as_blocked(harness):
-    harness.outputs["generation"] = Implementation(
+def test_coverage_id_conflict_stops_as_blocked(harness):
+    harness.outputs["coverage"] = CoverageDecision(
         status="BLOCKED",
         target=TARGET,
         summary="The Allure ID belongs to a test that does not cover the supplied behavior.",
     )
-    harness.actions["generation"] = None
 
     result = harness.run()
 
     assert result["status"] == "BLOCKED"
-    assert harness.called_stages == ["readiness", "generation"]
+    assert harness.called_stages == ["readiness", "coverage"]
     assert result["changed_files"] == []
     assert result["evidence"]["status"] == "NOT_VERIFIED"
 
@@ -139,42 +176,41 @@ def test_product_bug_from_repair_ends_without_another_stage(harness):
     result = harness.run()
 
     assert result["status"] == "PRODUCT_BUG"
-    assert harness.called_stages == ["readiness", "generation", "repair"]
+    assert harness.called_stages == ["readiness", "coverage", "generation", "repair"]
     assert result["evidence"]["status"] == "FAILED"
 
 
 def test_already_covered_without_execution_evidence_is_not_success(harness):
-    harness.outputs["generation"] = Implementation(
+    harness.outputs["coverage"] = CoverageDecision(
         status="ALREADY_COVERED",
         target=TARGET,
         summary="The exact scenario already has a source test.",
     )
-    harness.actions["generation"] = None
 
     result = harness.run()
 
     assert result["status"] == "NOT_VERIFIED"
-    assert harness.called_stages == ["readiness", "generation"]
-    assert result["stages"]["generation"]["target"] == TARGET
-    assert result["stages"]["generation"]["status"] == "NOT_VERIFIED"
+    assert harness.called_stages == ["readiness", "coverage"]
+    assert result["stages"]["coverage"]["target"] == TARGET
+    assert result["stages"]["coverage"]["status"] == "NOT_VERIFIED"
     assert result["changed_files"] == []
     assert result["evidence"]["status"] == "NOT_VERIFIED"
 
 
 def test_already_covered_with_matching_exact_target_evidence_is_success(harness):
-    harness.outputs["generation"] = Implementation(
+    harness.outputs["coverage"] = CoverageDecision(
         status="ALREADY_COVERED",
         target=TARGET,
         summary="The exact scenario already has a source test.",
     )
-    harness.actions["generation"] = lambda: harness.repository.record_run(
+    harness.actions["coverage"] = lambda: harness.repository.record_run(
         revision="original-source", changed=False
     )
 
     result = harness.run()
 
     assert result["status"] == "ALREADY_COVERED"
-    assert harness.called_stages == ["readiness", "generation"]
+    assert harness.called_stages == ["readiness", "coverage"]
     assert result["changed_files"] == []
     assert result["evidence"]["target"] == TARGET
     assert result["evidence"]["status"] == "VERIFIED"
@@ -182,12 +218,12 @@ def test_already_covered_with_matching_exact_target_evidence_is_success(harness)
 
 
 def test_equivalent_existing_test_failure_uses_the_same_repair_route(harness):
-    harness.outputs["generation"] = Implementation(
+    harness.outputs["coverage"] = CoverageDecision(
         status="ALREADY_COVERED",
         target=TARGET,
         summary="The exact scenario already has a source test.",
     )
-    harness.actions["generation"] = lambda: harness.repository.record_run(
+    harness.actions["coverage"] = lambda: harness.repository.record_run(
         status="FAILED",
         target_status="FAILED",
         revision="existing-failure",
@@ -196,20 +232,20 @@ def test_equivalent_existing_test_failure_uses_the_same_repair_route(harness):
 
     result = harness.run()
 
-    assert harness.called_stages == ["readiness", "generation", "repair"]
-    assert result["stages"]["generation"]["status"] == "FAILED"
-    assert result["stages"]["generation"]["evidence"]["target"] == TARGET
+    assert harness.called_stages == ["readiness", "coverage", "repair"]
+    assert result["stages"]["coverage"]["status"] == "FAILED"
+    assert result["stages"]["coverage"]["evidence"]["target"] == TARGET
     assert result["stages"]["repair"]["evidence"]["target"] == TARGET
     assert result["status"] == "VERIFIED"
 
 
 def test_already_covered_rejects_wrong_target_evidence(harness):
-    harness.outputs["generation"] = Implementation(
+    harness.outputs["coverage"] = CoverageDecision(
         status="ALREADY_COVERED",
         target=TARGET,
         summary="The exact scenario already has a source test.",
     )
-    harness.actions["generation"] = lambda: harness.repository.record_run(
+    harness.actions["coverage"] = lambda: harness.repository.record_run(
         revision="original-source",
         changed=False,
         target="tests.OtherApiTest.testOther",
@@ -218,12 +254,12 @@ def test_already_covered_rejects_wrong_target_evidence(harness):
     result = harness.run()
 
     assert result["status"] == "NOT_VERIFIED"
-    assert harness.called_stages == ["readiness", "generation"]
-    assert result["stages"]["generation"]["status"] == "NOT_VERIFIED"
+    assert harness.called_stages == ["readiness", "coverage"]
+    assert result["stages"]["coverage"]["status"] == "NOT_VERIFIED"
 
 
 def test_already_covered_claim_with_source_changes_is_not_verified(harness):
-    harness.outputs["generation"] = Implementation(
+    harness.outputs["coverage"] = CoverageDecision(
         status="ALREADY_COVERED", target=TARGET, summary="The scenario already has a source test."
     )
 
@@ -231,14 +267,14 @@ def test_already_covered_claim_with_source_changes_is_not_verified(harness):
         harness.repository.changed_files.add(TEST_PATH)
         harness.repository.current_diff = "synthetic unexecuted source change"
 
-    harness.actions["generation"] = modify_source_without_execution
+    harness.actions["coverage"] = modify_source_without_execution
 
     result = harness.run()
 
     assert result["status"] == "NOT_VERIFIED"
-    assert result["stages"]["generation"]["status"] == "NOT_VERIFIED"
+    assert result["stages"]["coverage"]["status"] == "NOT_VERIFIED"
     assert result["changed_files"] == [TEST_PATH]
-    assert harness.called_stages == ["readiness", "generation"]
+    assert harness.called_stages == ["readiness", "coverage"]
 
 
 def test_model_exception_produces_final_not_verified_report(harness):
@@ -283,3 +319,96 @@ def test_stage_reports_include_only_safe_metric_aggregates(harness):
     assert '"metrics"' in stage_report
     assert "messages" not in stage_report
     assert "input_params" not in stage_report
+
+
+def test_provider_clients_close_inside_graph_invocation(harness):
+    harness.run()
+
+    assert set(harness.closed_clients) == {
+        "readiness",
+        "coverage",
+        "generation",
+        "repair",
+        "review",
+    }
+
+
+@pytest.mark.parametrize("mode", ["failed_branch", "model_exception"])
+def test_provider_clients_close_when_workflow_does_not_succeed(harness, mode):
+    if mode == "failed_branch":
+        harness.outputs["readiness"].status = "BLOCKED"
+    else:
+        harness.actions["readiness"] = lambda: (_ for _ in ()).throw(
+            RuntimeError("Synthetic model failure")
+        )
+
+    harness.run()
+
+    assert set(harness.closed_clients) == {
+        "readiness",
+        "coverage",
+        "generation",
+        "repair",
+        "review",
+    }
+
+
+def test_one_client_close_error_does_not_skip_other_clients_or_change_result(harness):
+    harness.close_errors.add("coverage")
+
+    result = harness.run()
+
+    assert result["status"] == "VERIFIED"
+    assert set(harness.close_attempts) == {
+        "readiness",
+        "coverage",
+        "generation",
+        "repair",
+        "review",
+    }
+    assert "coverage" not in harness.closed_clients
+    assert set(harness.closed_clients) == {
+        "readiness",
+        "generation",
+        "repair",
+        "review",
+    }
+
+
+def test_cached_ready_status_skips_model_readiness(harness):
+    assessment = Assessment(
+        status="READY",
+        reason_and_evidence="Reused workbook status.",
+        next_action_or_question="Continue to coverage preflight.",
+    )
+
+    result = harness.run(initial_assessment=assessment, readiness_source="workbook_status")
+
+    assert harness.called_stages == ["coverage", "generation"]
+    assert result["execution_order"] == ["coverage", "generation"]
+    assert result["stages"]["readiness"]["source"] == "workbook_status"
+    assert (harness.repository.output_dir / "readiness.json").is_file()
+
+
+def test_explicit_model_reassessment_is_labeled_in_stage_and_result(harness):
+    result = harness.run(readiness_source="model_reassessment")
+
+    assert result["readiness_source"] == "model_reassessment"
+    assert result["stages"]["readiness"]["source"] == "model_reassessment"
+
+
+@pytest.mark.parametrize("status", ["BLOCKED", "NEEDS_CLARIFICATION"])
+def test_cached_nonready_status_stops_without_any_model_call(harness, status):
+    assessment = Assessment(
+        status=status,
+        reason_and_evidence="Reused workbook status.",
+        next_action_or_question="Reassess only when explicitly requested.",
+    )
+
+    result = harness.run(initial_assessment=assessment, readiness_source="workbook_status")
+
+    assert harness.called_stages == []
+    assert result["status"] == status
+    assert result["graph_status"] == "skipped"
+    assert result["execution_order"] == []
+    assert (harness.repository.output_dir / "readiness.json").is_file()

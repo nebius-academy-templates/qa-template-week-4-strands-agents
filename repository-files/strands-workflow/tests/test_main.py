@@ -16,12 +16,12 @@ import case_loader
 import main as entry
 
 
-def write_workbook(path: Path, *case_ids: str) -> None:
+def write_workbook(path: Path, *case_ids: str, statuses: dict[str, str] | None = None) -> None:
     workbook = Workbook()
     summary = workbook.active
     summary.title = "Case Summary"
     summary.append(["Course cases"])
-    summary.append(["Case ID", "Title", "Description", "Preconditions"])
+    summary.append(["Case ID", "Title", "Description", "Preconditions", "Automated Test"])
     for case_id in case_ids:
         summary.append(
             [
@@ -29,6 +29,7 @@ def write_workbook(path: Path, *case_ids: str) -> None:
                 f"Title for {case_id}",
                 f"Description for {case_id}",
                 f"Preconditions for {case_id}",
+                (statuses or {}).get(case_id, ""),
             ]
         )
     steps = workbook.create_sheet("Steps")
@@ -74,13 +75,19 @@ def install_runtime_stubs(monkeypatch, outcomes: dict[str, str | dict]):
         models.append((provider, model, instance))
         return instance
 
-    def make_agents(repository, model_factory):
-        agents = {"case_id": repository.case_id, "model": model_factory()}
+    def make_agents(repository, model_factory, *, include_readiness=True):
+        roles = ["coverage", "generation", "repair", "review"]
+        if include_readiness:
+            roles.insert(0, "readiness")
+        agents = {
+            "case_id": repository.case_id,
+            "models": {role: model_factory(role) for role in roles},
+        }
         agent_sets.append(agents)
         return agents
 
-    def run_workflow(case, repository, agents):
-        calls.append((repository.case_id, case, repository, agents))
+    def run_workflow(case, repository, agents, **kwargs):
+        calls.append((repository.case_id, case, repository, agents, kwargs))
         outcome = outcomes[repository.case_id]
         if isinstance(outcome, dict):
             result = {"case_id": repository.case_id, **outcome}
@@ -100,7 +107,7 @@ def install_runtime_stubs(monkeypatch, outcomes: dict[str, str | dict]):
                             "status": "VERIFIED",
                             "target_status": "VERIFIED",
                         },
-                        "stages": {"generation": {"target": target}},
+                        "stages": {"coverage": {"target": target}},
                     }
                 )
         repository.output_dir.mkdir(parents=True)
@@ -139,6 +146,38 @@ def test_read_cases_opens_workbook_once_and_preserves_order(tmp_path, monkeypatc
     assert "API-1002" not in first[1]
     assert "Title for API-1002" in second[1]
     assert "API-1001" not in second[1]
+
+
+def test_read_cases_reuses_only_exact_readiness_statuses(tmp_path):
+    workbook = tmp_path / "cases.xlsx"
+    write_workbook(
+        workbook,
+        "API-1001",
+        "API-1002",
+        "API-1003",
+        "API-1004",
+        "API-1005",
+        statuses={
+            "API-1001": "READY FOR AUTOMATION",
+            "API-1002": "BLOCKED",
+            "API-1003": "TODO",
+            "API-1004": "api-tests/src/test/kotlin/tests/ExistingTest.kt",
+            "API-1005": "blocked",
+        },
+    )
+
+    cases = entry.read_cases(
+        workbook,
+        ["API-1001", "API-1002", "API-1003", "API-1004", "API-1005"],
+    )
+
+    assert [case.readiness_status for case in cases] == [
+        "READY",
+        "BLOCKED",
+        None,
+        None,
+        None,
+    ]
 
 
 def test_read_cases_requires_named_sheets_and_one_row_per_case(tmp_path):
@@ -209,7 +248,9 @@ def test_main_accepts_one_or_more_case_ids_in_cli_order(tmp_path, monkeypatch):
     write_workbook(workbook, "API-1001", "API-1002")
     captured = {}
 
-    def run_cases(repository, case_path, case_ids, provider, model, api_url, export_otel):
+    def run_cases(**kwargs):
+        repository = kwargs["repository"]
+        case_ids = kwargs["case_ids"]
         captured["case_ids"] = case_ids
         report_path = repository / "result.json"
         return {"batch_status": "COMPLETED", "cases": []}, report_path
@@ -237,6 +278,66 @@ def test_main_accepts_one_or_more_case_ids_in_cli_order(tmp_path, monkeypatch):
     assert captured["case_ids"] == ["API-1002", "API-1001"]
 
 
+def test_main_forwards_separate_models_and_prepared_mode(tmp_path, monkeypatch):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    workbook = tmp_path / "cases.xlsx"
+    write_workbook(workbook, "API-1001")
+    captured = {}
+
+    def run_cases(**kwargs):
+        captured.update(kwargs)
+        return {"batch_status": "COMPLETED", "cases": []}, repository / "result.json"
+
+    monkeypatch.setattr(entry, "run_cases", run_cases)
+
+    assert (
+        entry.main(
+            [
+                "--repo",
+                str(repository),
+                "--case-file",
+                str(workbook),
+                "--case-id",
+                "API-1001",
+                "--provider",
+                "anthropic",
+                "--model",
+                "claude-opus-5",
+                "--analysis-model",
+                "claude-sonnet-5",
+                "--prepared-cases",
+            ]
+        )
+        == 0
+    )
+    assert captured["model"] == "claude-opus-5"
+    assert captured["analysis_model"] == "claude-sonnet-5"
+    assert captured["prepared_cases"] is True
+    assert captured["reassess_readiness"] is False
+
+
+def test_prepared_mode_requires_xlsx_input(tmp_path, monkeypatch):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    case_file = tmp_path / "API-1001.md"
+    case_file.write_text("Complete API-1001 case", encoding="utf-8")
+    monkeypatch.setattr(entry, "make_agents", lambda *args, **kwargs: pytest.fail("no agents"))
+
+    with pytest.raises(ValueError, match="requires an XLSX workbook"):
+        entry.run_cases(
+            repository,
+            case_file,
+            ["API-1001"],
+            "anthropic",
+            "claude-opus-5",
+            "http://127.0.0.1:8080",
+            prepared_cases=True,
+        )
+
+    assert not (repository / ".agent-state").exists()
+
+
 def test_batch_runs_one_text_case(tmp_path, monkeypatch):
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -260,6 +361,8 @@ def test_batch_runs_one_text_case(tmp_path, monkeypatch):
         ("API-1001", "Complete API-1001 case")
     ]
     assert report["batch_status"] == "COMPLETED"
+    assert report["models"] == {"analysis": "claude-sonnet-5", "implementation": "test-model"}
+    assert report["readiness_mode"] == "reuse_or_assess"
     assert report["processed_case_ids"] == ["API-1001"]
     assert report["remaining_case_ids"] == []
     assert telemetry[0].closed is True
@@ -288,7 +391,7 @@ def test_batch_runs_cases_in_order_with_fresh_state_and_separate_reports(tmp_pat
     assert [case_id for case_id, *_ in calls] == ["API-1001", "API-1002"]
     assert len({id(adapter) for adapter in adapters}) == 2
     assert len({id(agents) for agents in agent_sets}) == 2
-    assert len({id(model[2]) for model in models}) == 2
+    assert len({id(model[2]) for model in models}) == 10
     assert adapters[0].output_dir.name == "001-API-1001"
     assert adapters[1].output_dir.name == "002-API-1002"
     assert all((adapter.output_dir / "result.json").is_file() for adapter in adapters)
@@ -310,6 +413,159 @@ def test_batch_runs_cases_in_order_with_fresh_state_and_separate_reports(tmp_pat
     assert telemetry[0].closed is True
 
 
+def test_role_models_route_analysis_away_from_generation_and_repair(tmp_path, monkeypatch):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    workbook = tmp_path / "cases.xlsx"
+    write_workbook(workbook, "API-1001")
+    _, _, _, models, _ = install_runtime_stubs(monkeypatch, {"API-1001": "REVIEWED"})
+
+    entry.run_cases(
+        repository,
+        workbook,
+        ["API-1001"],
+        "anthropic",
+        "claude-opus-5",
+        "http://127.0.0.1:8080",
+        analysis_model="claude-sonnet-5",
+    )
+
+    assert [model_id for _, model_id, _ in models].count("claude-sonnet-5") == 3
+    assert [model_id for _, model_id, _ in models].count("claude-opus-5") == 2
+
+
+@pytest.mark.parametrize("status", ["BLOCKED", "NEEDS_CLARIFICATION"])
+def test_cached_nonready_status_skips_agent_construction(tmp_path, monkeypatch, status):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    workbook = tmp_path / "cases.xlsx"
+    write_workbook(workbook, "API-1001", statuses={"API-1001": status})
+    _, agent_sets, calls, models, _ = install_runtime_stubs(monkeypatch, {"API-1001": status})
+
+    entry.run_cases(
+        repository,
+        workbook,
+        ["API-1001"],
+        "anthropic",
+        "claude-opus-5",
+        "http://127.0.0.1:8080",
+        analysis_model="claude-sonnet-5",
+    )
+
+    assert agent_sets == []
+    assert models == []
+    assert calls[0][4]["initial_assessment"].status == status
+    assert calls[0][4]["readiness_source"] == "workbook_status"
+
+
+def test_prepared_mode_skips_statusless_model_readiness(tmp_path, monkeypatch):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    workbook = tmp_path / "cases.xlsx"
+    write_workbook(workbook, "API-1001", statuses={"API-1001": "TODO"})
+    _, _, calls, models, _ = install_runtime_stubs(monkeypatch, {"API-1001": "REVIEWED"})
+
+    entry.run_cases(
+        repository,
+        workbook,
+        ["API-1001"],
+        "anthropic",
+        "claude-opus-5",
+        "http://127.0.0.1:8080",
+        analysis_model="claude-sonnet-5",
+        prepared_cases=True,
+    )
+
+    assert len(models) == 4
+    assert calls[0][4]["initial_assessment"].status == "READY"
+    assert calls[0][4]["readiness_source"] == "prepared_preflight"
+
+
+def test_prepared_mode_validates_all_required_values_before_agents(tmp_path, monkeypatch):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    workbook = tmp_path / "cases.xlsx"
+    write_workbook(workbook, "API-1001", "API-1002")
+    source = case_loader.load_workbook(workbook)
+    source["Steps"]["C4"] = ""
+    source.save(workbook)
+    source.close()
+    constructed = []
+    monkeypatch.setattr(entry, "make_agents", lambda *args, **kwargs: constructed.append(args))
+
+    with pytest.raises(ValueError, match="API-1002.*Steps.Expected Results"):
+        entry.run_cases(
+            repository,
+            workbook,
+            ["API-1001", "API-1002"],
+            "anthropic",
+            "claude-opus-5",
+            "http://127.0.0.1:8080",
+            prepared_cases=True,
+        )
+
+    assert constructed == []
+    assert not (repository / ".agent-state").exists()
+
+
+def test_nonempty_field_gate_is_limited_to_prepared_mode(tmp_path):
+    workbook = tmp_path / "cases.xlsx"
+    write_workbook(workbook, "API-1001")
+    source = case_loader.load_workbook(workbook)
+    source["Case Summary"]["B3"] = ""
+    source.save(workbook)
+    source.close()
+
+    case = entry.read_cases(workbook, ["API-1001"])[0]
+
+    assert case.case_id == "API-1001"
+    with pytest.raises(ValueError, match="Case Summary.Title"):
+        entry.validate_prepared_case(case)
+
+
+def test_anthropic_analysis_defaults_to_sonnet(tmp_path, monkeypatch):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    workbook = tmp_path / "cases.xlsx"
+    write_workbook(workbook, "API-1001")
+    _, _, _, models, _ = install_runtime_stubs(monkeypatch, {"API-1001": "REVIEWED"})
+
+    entry.run_cases(
+        repository,
+        workbook,
+        ["API-1001"],
+        "anthropic",
+        "claude-opus-5",
+        "http://127.0.0.1:8080",
+    )
+
+    assert [model_id for _, model_id, _ in models].count("claude-sonnet-5") == 3
+    assert [model_id for _, model_id, _ in models].count("claude-opus-5") == 2
+
+
+def test_explicit_reassessment_ignores_cached_readiness(tmp_path, monkeypatch):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    workbook = tmp_path / "cases.xlsx"
+    write_workbook(workbook, "API-1001", statuses={"API-1001": "READY FOR AUTOMATION"})
+    _, _, calls, models, _ = install_runtime_stubs(monkeypatch, {"API-1001": "REVIEWED"})
+
+    entry.run_cases(
+        repository,
+        workbook,
+        ["API-1001"],
+        "anthropic",
+        "claude-opus-5",
+        "http://127.0.0.1:8080",
+        analysis_model="claude-sonnet-5",
+        reassess_readiness=True,
+    )
+
+    assert len(models) == 5
+    assert calls[0][4]["initial_assessment"] is None
+    assert calls[0][4]["readiness_source"] == "model_reassessment"
+
+
 def test_already_covered_requires_unchanged_source_and_matching_target_evidence():
     target = "tests.ExistingApiTest.testCase"
     result = {
@@ -320,7 +576,7 @@ def test_already_covered_requires_unchanged_source_and_matching_target_evidence(
             "status": "VERIFIED",
             "target_status": "VERIFIED",
         },
-        "stages": {"generation": {"target": target}},
+        "stages": {"coverage": {"target": target}},
     }
 
     assert entry.case_succeeded(result) is True
@@ -374,7 +630,8 @@ def test_batch_stops_on_bare_already_covered(tmp_path, monkeypatch):
     )
 
     assert [case_id for case_id, *_ in calls] == ["API-1001"]
-    assert len(adapters) == len(agent_sets) == len(models) == 1
+    assert len(adapters) == len(agent_sets) == 1
+    assert len(models) == 5
     assert report["batch_status"] == "STOPPED"
     assert report["processed_case_ids"] == ["API-1001"]
     assert report["remaining_case_ids"] == ["API-1002"]
@@ -402,7 +659,8 @@ def test_batch_stops_before_constructing_the_next_case_agents(tmp_path, monkeypa
     )
 
     assert [case_id for case_id, *_ in calls] == ["API-1001"]
-    assert len(adapters) == len(agent_sets) == len(models) == 1
+    assert len(adapters) == len(agent_sets) == 1
+    assert len(models) == 5
     assert report["batch_status"] == "STOPPED"
     assert report["processed_case_ids"] == ["API-1001"]
     assert report["remaining_case_ids"] == ["API-1002"]

@@ -14,6 +14,14 @@ class Assessment(BaseModel):
     next_action_or_question: str
 
 
+class CoverageDecision(BaseModel):
+    status: Literal["GAP", "ALREADY_COVERED", "FAILED", "NOT_VERIFIED", "BLOCKED"]
+    target: str = ""
+    summary: str
+    case_id: str = ""
+    source_fingerprint: str = ""
+
+
 class Implementation(BaseModel):
     status: Literal["VERIFIED", "ALREADY_COVERED", "FAILED", "NOT_VERIFIED", "BLOCKED"]
     target: str = ""

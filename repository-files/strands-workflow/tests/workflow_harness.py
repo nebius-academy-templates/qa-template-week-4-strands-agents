@@ -13,7 +13,7 @@ from strands.models.model import Model
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from state import Assessment, Implementation, RepairOutcome, ReviewResult
+from state import Assessment, CoverageDecision, Implementation, RepairOutcome, ReviewResult
 from workflow import run_workflow
 
 TARGET = "tests.ExampleTest.testExample"
@@ -71,6 +71,9 @@ class RepositoryStub:
         self.evidence_reads = 0
         self.on_evidence_read = None
 
+    def source_fingerprint(self):
+        return self.source_revision
+
     def current_evidence(self):
         self.evidence_reads += 1
         if self.on_evidence_read:
@@ -113,11 +116,17 @@ class WorkflowHarness:
     def __init__(self, output_dir):
         self.repository = RepositoryStub(output_dir)
         self.calls = []
+        self.closed_clients = []
+        self.close_attempts = []
+        self.close_errors = set()
         self.outputs: dict[str, BaseModel] = {
             "readiness": Assessment(
                 status="READY",
                 reason_and_evidence="The synthetic case has an expected response.",
                 next_action_or_question="Generate and execute the exact test.",
+            ),
+            "coverage": CoverageDecision(
+                status="GAP", summary="No equivalent test or Allure ID conflict exists."
             ),
             "generation": Implementation(
                 status="VERIFIED", target=TARGET, summary="Test generated."
@@ -130,18 +139,36 @@ class WorkflowHarness:
             "repair": lambda: self.repository.record_run(revision="repaired"),
         }
 
-    def run(self):
-        agents = {
-            stage: Agent(
-                model=OfflineModel(stage, output, self.calls, self.actions.get(stage)),
+    def run(self, *, initial_assessment=None, readiness_source="model"):
+        agents = {}
+        for stage, output in self.outputs.items():
+            model = OfflineModel(stage, output, self.calls, self.actions.get(stage))
+
+            class Client:
+                def __init__(client_self, name):
+                    client_self.name = name
+
+                async def close(client_self):
+                    self.close_attempts.append(client_self.name)
+                    if client_self.name in self.close_errors:
+                        raise RuntimeError(f"Synthetic close failure for {client_self.name}")
+                    self.closed_clients.append(client_self.name)
+
+            model.client = Client(stage)
+            agents[stage] = Agent(
+                model=model,
                 agent_id=stage,
                 structured_output_model=type(output),
                 callback_handler=None,
                 retry_strategy=None,
             )
-            for stage, output in self.outputs.items()
-        }
-        result = run_workflow(CASE, self.repository, agents)
+        result = run_workflow(
+            CASE,
+            self.repository,
+            agents,
+            initial_assessment=initial_assessment,
+            readiness_source=readiness_source,
+        )
         assert (
             json.loads((self.repository.output_dir / "result.json").read_text(encoding="utf-8"))
             == result

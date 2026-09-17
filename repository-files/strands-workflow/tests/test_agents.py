@@ -26,7 +26,10 @@ def test_make_agents_rejects_readiness_instructions_outside_agent_docs(tmp_path)
         FileNotFoundError,
         match="agent_docs/task-automation-readiness-instructions.md is required",
     ):
-        make_agents(SimpleNamespace(root=tmp_path), lambda: pytest.fail("model was constructed"))
+        make_agents(
+            SimpleNamespace(root=tmp_path),
+            lambda _role: pytest.fail("model was constructed"),
+        )
 
 
 def test_anthropic_model_enables_ephemeral_prompt_and_tool_cache(monkeypatch):
@@ -39,6 +42,7 @@ def test_anthropic_model_enables_ephemeral_prompt_and_tool_cache(monkeypatch):
     assert cache.ttl == "1h"
     assert cache.system_prompt_ttl is True
     assert cache.tools_ttl is True
+    assert model.get_config()["params"] == {"output_config": {"effort": "medium"}}
 
 
 def test_anthropic_cache_ttl_rejects_unsupported_value(monkeypatch):

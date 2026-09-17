@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import inspect
 import json
+import logging
 
 from metrics import stage_metrics
-from state import EVIDENCE_STATUSES
-from strands.hooks import AfterNodeCallEvent
+from state import EVIDENCE_STATUSES, Assessment
+from strands.hooks import AfterMultiAgentInvocationEvent, AfterNodeCallEvent, BeforeNodeCallEvent
 from strands.multiagent import GraphBuilder
 from strands.multiagent.base import Status
+
+logger = logging.getLogger(__name__)
 
 
 def verified_target(evidence: dict, target: str) -> bool:
@@ -38,10 +42,43 @@ def stage_report(state, name: str) -> dict:
     return {**output, "metrics": stage_metrics(state.results[name])}
 
 
-def build_graph(agents: dict, repository):
+def validated_gap_handoff(output: dict, repository) -> bool:
+    """Accept a GAP only for this case and the still-current source state."""
+    return (
+        output.get("status") == "GAP"
+        and output.get("case_id") == repository.case_id
+        and bool(output.get("source_fingerprint"))
+        and output.get("source_fingerprint") == repository.source_fingerprint()
+        and not repository.changed_files
+    )
+
+
+async def _close_model_clients(agents: dict) -> None:
+    """Close every distinct provider client without hiding the workflow result."""
+    seen: set[int] = set()
+    for agent in agents.values():
+        client = getattr(getattr(agent, "model", None), "client", None)
+        if client is None or id(client) in seen:
+            continue
+        close = getattr(client, "close", None)
+        if not callable(close):
+            continue
+        seen.add(id(client))
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.warning("Could not close a workflow model client", exc_info=True)
+
+
+def build_graph(agents: dict, repository, *, include_readiness: bool = True):
     """Repair owns its existing run loop and budgets; the graph chooses stages."""
     builder = GraphBuilder()
-    for name in ("readiness", "generation", "repair"):
+    node_names = ["coverage", "generation", "repair"]
+    if include_readiness:
+        node_names.insert(0, "readiness")
+    for name in node_names:
         builder.add_node(agents[name], name)
 
     # The review agent and its output schema are supplied, but this starter does
@@ -50,21 +87,32 @@ def build_graph(agents: dict, repository):
     def ready(state):
         return result_data(state, "readiness").get("status") == "READY"
 
-    def passed(state, name):
-        return result_data(state, name).get("status") == "VERIFIED"
+    def gap(state):
+        return validated_gap_handoff(result_data(state, "coverage"), repository)
 
-    def failed_target(state):
-        output = result_data(state, "generation")
+    def failed_target(state, name):
+        output = result_data(state, name)
         return (
             output.get("status") == "FAILED"
             and output.get("evidence", {}).get("target_status") == "FAILED"
         )
 
-    builder.add_edge("readiness", "generation", ready)
-    builder.add_edge("generation", "repair", failed_target)
-    builder.set_entry_point("readiness")
-    builder.set_max_node_executions(4)
+    if include_readiness:
+        builder.add_edge("readiness", "coverage", ready)
+        builder.set_entry_point("readiness")
+    else:
+        builder.set_entry_point("coverage")
+    builder.add_edge("coverage", "generation", gap)
+    builder.add_edge("coverage", "repair", lambda state: failed_target(state, "coverage"))
+    builder.add_edge("generation", "repair", lambda state: failed_target(state, "generation"))
+    builder.set_max_node_executions(5)
     graph = builder.build()
+    coverage_start_fingerprint = ""
+
+    def before_node(event):
+        nonlocal coverage_start_fingerprint
+        if event.node_id == "coverage":
+            coverage_start_fingerprint = repository.source_fingerprint()
 
     def after_node(event):
         node = event.source.state.results[event.node_id]
@@ -72,7 +120,26 @@ def build_graph(agents: dict, repository):
         if getattr(result, "structured_output", None) is None:
             return
         output = result.structured_output.model_dump()
-        if event.node_id in {"generation", "repair"}:
+        if event.node_id == "coverage" and output.get("status") == "GAP":
+            current_fingerprint = repository.source_fingerprint()
+            if (
+                not coverage_start_fingerprint
+                or current_fingerprint != coverage_start_fingerprint
+                or repository.changed_files
+            ):
+                output["status"] = "NOT_VERIFIED"
+                output["summary"] = (
+                    "Repository sources changed during the coverage preflight; "
+                    "generation was not authorized"
+                )
+            else:
+                # A GAP is source evidence, not execution evidence. The host binds
+                # the handoff to the selected case and exact source state instead.
+                output["case_id"] = repository.case_id
+                output["source_fingerprint"] = current_fingerprint
+            output["changed_files"] = sorted(repository.changed_files)
+            output["diff"] = repository.diff()
+        elif event.node_id in {"coverage", "generation", "repair"}:
             evidence = repository.current_evidence()
             output["evidence"] = evidence
             claimed_target = output.get("target", "")
@@ -102,11 +169,14 @@ def build_graph(agents: dict, repository):
                     if output["status"] == "FAILED" and evidence.get("target_status") != "FAILED":
                         output["status"] = "NOT_VERIFIED"
             if event.node_id == "repair" and output["status"] == "VERIFIED":
-                generation_target = result_data(event.source.state, "generation").get("target", "")
-                if not verified_target(evidence, generation_target):
+                origin = result_data(event.source.state, "generation") or result_data(
+                    event.source.state, "coverage"
+                )
+                origin_target = origin.get("target", "")
+                if not verified_target(evidence, origin_target):
                     output["status"] = "NOT_VERIFIED"
                     output["summary"] = (
-                        "Repair evidence does not verify the exact target selected by generation"
+                        "Repair evidence does not verify the exact target selected before repair"
                     )
             output["target"] = claimed_target or evidence.get("target", "")
             output["changed_files"] = sorted(repository.changed_files)
@@ -130,15 +200,53 @@ def build_graph(agents: dict, repository):
             json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
+    async def close_model_clients(event):
+        """Close async provider clients before Strands closes its invocation loop."""
+        del event
+        await _close_model_clients(agents)
+
+    graph.add_hook(before_node, BeforeNodeCallEvent)
     graph.add_hook(after_node, AfterNodeCallEvent)
+    graph.add_hook(close_model_clients, AfterMultiAgentInvocationEvent)
     return graph
 
 
-def run_workflow(case: str, repository, agents: dict) -> dict:
-    graph = build_graph(agents, repository)
+def run_workflow(
+    case: str,
+    repository,
+    agents: dict,
+    *,
+    initial_assessment: Assessment | None = None,
+    readiness_source: str = "model",
+) -> dict:
+    initial_stage = None
+    if initial_assessment is not None:
+        initial_stage = {**initial_assessment.model_dump(), "source": readiness_source}
+        (repository.output_dir / "readiness.json").write_text(
+            json.dumps(initial_stage, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        if initial_assessment.status != "READY":
+            report = {
+                "case_id": repository.case_id,
+                "status": initial_assessment.status,
+                "graph_status": "skipped",
+                "error_type": None,
+                "execution_order": [],
+                "changed_files": sorted(repository.changed_files),
+                "evidence": repository.current_evidence(),
+                "stages": {"readiness": initial_stage},
+                "readiness_source": readiness_source,
+            }
+            path = repository.output_dir / "result.json"
+            path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+            return report
+
+    include_readiness = initial_assessment is None
+    graph = build_graph(agents, repository, include_readiness=include_readiness)
     task = (
         f"Complete the API automation workflow for {repository.case_id}. "
-        "The request includes source assessment, generation, execution, repair of an "
+        "The request includes readiness selection, coverage comparison, generation, "
+        "execution, repair of an "
         "evidence-backed test automation defect if needed, and local read-only review. "
         "Keep the complete case as the source of expected behavior at every stage.\n\n" + case
     )
@@ -149,6 +257,10 @@ def run_workflow(case: str, repository, agents: dict) -> dict:
         error = type(failure).__name__
     state = graph.state
     stages = {name: stage_report(state, name) for name in state.results}
+    if initial_stage is not None:
+        stages = {"readiness": initial_stage, **stages}
+    elif stages.get("readiness"):
+        stages["readiness"]["source"] = readiness_source
     order = [node.node_id for node in state.execution_order]
     final = stages.get(order[-1], {}) if order else {}
     status = final.get("status", "NOT_VERIFIED")
@@ -156,30 +268,36 @@ def run_workflow(case: str, repository, agents: dict) -> dict:
     blocking_reason = ""
     if error or state.status != Status.COMPLETED:
         status = "NOT_VERIFIED"
-    if status == "REVIEWED" and evidence.get("status") != "VERIFIED":
-        status = "NOT_VERIFIED"
     generation = stages.get("generation", {})
-    generation_evidence = generation.get("evidence", {})
-    repair_evidence = stages.get("repair", {}).get("evidence", {})
+    coverage = stages.get("coverage", {})
+    repair = stages.get("repair", {})
+    final_target = repair.get("target") or generation.get("target") or coverage.get("target", "")
+    if status in {"VERIFIED", "REVIEWED"} and not verified_target(evidence, final_target):
+        status = "NOT_VERIFIED"
+        blocking_reason = "Final result has no matching verified exact-target evidence"
+    repair_evidence = repair.get("evidence", {})
     if "repair" in order and status in {"VERIFIED", "REVIEWED"}:
-        generation_failed_exact_target = (
-            generation.get("status") == "FAILED"
-            and generation_evidence.get("target") == generation.get("target")
-            and generation_evidence.get("target_status") == "FAILED"
+        repair_origin = generation if "generation" in order else coverage
+        origin_evidence = repair_origin.get("evidence", {})
+        origin_failed_exact_target = (
+            repair_origin.get("status") == "FAILED"
+            and origin_evidence.get("target") == repair_origin.get("target")
+            and origin_evidence.get("target_status") == "FAILED"
         )
-        if not generation_failed_exact_target:
+        if not origin_failed_exact_target:
             status = "NOT_VERIFIED"
-            blocking_reason = (
-                "Generation evidence does not establish failure of the selected target"
-            )
-        elif not verified_target(repair_evidence, generation.get("target", "")):
+            blocking_reason = "Pre-repair evidence does not establish failure of the target"
+        elif not verified_target(repair_evidence, repair_origin.get("target", "")):
             status = "NOT_VERIFIED"
-            blocking_reason = "Repair evidence does not verify the target selected by generation"
+            blocking_reason = "Repair evidence does not verify the selected target"
     if status == "ALREADY_COVERED" and not (
-        not repository.changed_files and verified_target(evidence, generation.get("target", ""))
+        not repository.changed_files and verified_target(evidence, coverage.get("target", ""))
     ):
         status = "NOT_VERIFIED"
         blocking_reason = "Equivalent source coverage has no matching verified target evidence"
+    if status == "GAP" and not validated_gap_handoff(coverage, repository):
+        status = "NOT_VERIFIED"
+        blocking_reason = "Coverage GAP handoff does not match the current case and source state"
     report = {
         "case_id": repository.case_id,
         "status": status,
@@ -189,6 +307,7 @@ def run_workflow(case: str, repository, agents: dict) -> dict:
         "changed_files": sorted(repository.changed_files),
         "evidence": evidence,
         "stages": stages,
+        "readiness_source": readiness_source,
     }
     if blocking_reason:
         report["blocking_reason"] = blocking_reason

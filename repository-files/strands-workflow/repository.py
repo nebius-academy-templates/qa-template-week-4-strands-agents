@@ -255,6 +255,10 @@ class Repository:
                 result.update(file.read_bytes())
         return result.hexdigest()
 
+    def source_fingerprint(self) -> str:
+        """Fingerprint the readable source state used by a coverage handoff."""
+        return self._source_digest()
+
     def current_evidence(self) -> dict:
         if self.last_run is None:
             return {"status": "NOT_VERIFIED", "reason": "No API execution has completed"}
@@ -570,7 +574,7 @@ class Repository:
             (folder / "format.log").write_text(run.stdout, encoding="utf-8")
         return run
 
-    def run_api_test(self, target: str) -> dict:
+    def run_api_test(self, target: str, *, format_sources: bool = True) -> dict:
         if not isinstance(target, str) or not re.fullmatch(TARGET_PATTERN, target):
             raise ValueError("Use an exact package.Class.method target")
         expected = self._inventory()
@@ -617,16 +621,17 @@ class Repository:
         approved = False
         run = subprocess.CompletedProcess(command, 127, "Execution did not start")
         try:
-            # Formatting is a non-test command. Complete it before PRE starts the
-            # canonical repair run, so a formatter failure consumes no run budget.
-            run = self._format_api_tests(wrapper, folder)
-            summary["format_log"] = relative("format.log")
-            summary["format_exit_code"] = run.returncode
-            if run.returncode:
-                raise RuntimeError(
-                    "API formatting did not complete within the permitted test layers; "
-                    "inspect format_log"
-                )
+            if format_sources:
+                # Formatting is a source-changing operation. Generation and repair
+                # perform it before PRE; read-only coverage execution skips it.
+                run = self._format_api_tests(wrapper, folder)
+                summary["format_log"] = relative("format.log")
+                summary["format_exit_code"] = run.returncode
+                if run.returncode:
+                    raise RuntimeError(
+                        "API formatting did not complete within the permitted test layers; "
+                        "inspect format_log"
+                    )
             pre = self._hook("before", command_text, folder)
             denial = pre.get("hookSpecificOutput", {})
             if denial.get("permissionDecision") == "deny":

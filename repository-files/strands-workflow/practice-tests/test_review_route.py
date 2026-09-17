@@ -40,7 +40,7 @@ def harness(tmp_path):
 def test_verified_generation_reaches_review_with_current_handoff(harness):
     result = harness.run()
 
-    assert harness.called_stages == ["readiness", "generation", "review"]
+    assert harness.called_stages == ["readiness", "coverage", "generation", "review"]
     assert result["status"] == "REVIEWED"
     review_input = harness.input_for("review")
     assert CASE in review_input
@@ -58,7 +58,13 @@ def test_verified_repair_reaches_review_with_repaired_handoff(harness):
 
     result = harness.run()
 
-    assert harness.called_stages == ["readiness", "generation", "repair", "review"]
+    assert harness.called_stages == [
+        "readiness",
+        "coverage",
+        "generation",
+        "repair",
+        "review",
+    ]
     assert result["status"] == "REVIEWED"
     review_input = harness.input_for("review")
     assert "synthetic-repaired-report.xml" in review_input
@@ -80,7 +86,7 @@ def test_repair_evidence_for_another_target_never_reaches_review(harness):
 
     result = harness.run()
 
-    assert harness.called_stages == ["readiness", "generation", "repair"]
+    assert harness.called_stages == ["readiness", "coverage", "generation", "repair"]
     assert result["status"] == "NOT_VERIFIED"
     assert result["stages"]["repair"]["target"] == TARGET
     assert result["stages"]["repair"]["evidence"]["target"] == wrong_target
@@ -123,5 +129,5 @@ def test_stale_or_missing_evidence_blocks_review(harness, change):
     result = harness.run()
 
     assert result["status"] == "NOT_VERIFIED"
-    assert harness.called_stages == ["readiness", "generation"]
+    assert harness.called_stages == ["readiness", "coverage", "generation"]
     assert result["evidence"]["status"] == "NOT_VERIFIED"

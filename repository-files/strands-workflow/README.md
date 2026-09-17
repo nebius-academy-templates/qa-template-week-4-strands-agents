@@ -1,15 +1,16 @@
 # Evidence-backed API workflow with Strands
 
-This starter coordinates one or more complete API cases through source
-assessment, generation and fresh execution, conditional repair, and a read-only
-check against each original case. Cases run in the supplied order, with a fresh
-graph and repository adapter for each case. It uses the documents, skills, hook,
-Kotlin suite, and case workbook already installed in the practice repository.
+This starter coordinates one or more complete API cases through readiness
+selection, coverage comparison, generation and fresh execution, conditional
+repair, and a read-only check against each original case. Cases run in the
+supplied order, with a fresh graph and repository adapter for each case. It uses
+the documents, skills, hook, Kotlin suite, and case workbook already installed
+in the practice repository.
 
-The starter supplies all four agents and the deterministic repository adapter.
-Its graph connects readiness, generation, and conditional repair. The review
-agent is deliberately not registered as a graph node until the review-route
-practice is completed.
+The starter supplies five roles and the deterministic repository adapter. Its
+graph connects readiness, coverage, generation, and conditional repair. The
+review agent is deliberately not registered as a graph node until the
+review-route practice is completed.
 
 ## Prerequisites
 
@@ -52,7 +53,10 @@ python3 -m venv .venv
 
 Set either `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in the current environment.
 Do not put a key in this repository. Select the matching provider and an
-available model explicitly when running `main.py`.
+available models explicitly when running `main.py`. The analysis model handles
+readiness, coverage, and the later review route. The implementation model is
+used only when coverage reports a real gap or an exact failing target enters
+repair. For Anthropic, both model configurations request `medium` effort.
 
 ## How the application is assembled
 
@@ -71,7 +75,8 @@ of a successful run. The host application supplies those operations separately.
 | Agent | Instruction source | Supplied access |
 |---|---|---|
 | `readiness` | Existing readiness instructions | Read and search repository sources. |
-| `generation` | `gen-api-test` through `AgentSkills` | Read, plan, edit permitted API test layers, and run the selected API test method fresh. |
+| `coverage` | Coverage preflight in `gen-api-test` through `AgentSkills` | Read and search source, then run an equivalent existing test's exact target when found. |
+| `generation` | Remaining `gen-api-test` procedure through `AgentSkills` | Reuse a `GAP` handoff, plan, edit permitted API test layers, and run the selected API test method fresh. |
 | `repair` | `test-repair` through `AgentSkills` | Diagnose the selected target, use the existing queue, edit permitted test layers, and rerun that exact target. |
 | `review` | Case-check section of `automate-test-case` | Read the complete case, final test, helpers, plan, diff, and current evidence. |
 
@@ -83,23 +88,49 @@ test and no source changed. A bare source-level coverage claim or evidence for
 another target is `NOT_VERIFIED`. An occupied Allure ID without equivalent
 behavior is reported as `BLOCKED`.
 
+For workbook input, the host reuses only exact readiness values from
+`Case Summary.Automated Test`: `READY FOR AUTOMATION`, `BLOCKED`, and
+`NEEDS_CLARIFICATION`. `TODO`, an empty cell, and a test source path are not
+readiness results. The default mode calls the readiness model only when no
+reusable status exists. Pass `--reassess-readiness` to request a new assessment
+even when the workbook has a status. For a curated batch whose cases have
+already been prepared in the course workbook, pass `--prepared-cases`. This mode
+accepts XLSX input only. Statusless cases then use deterministic workbook shape
+checks plus non-empty values in the required selected-case fields, and continue
+to coverage without a separate readiness model call. Ordinary workbook loading
+always checks the required sheets, columns, and one selected row per case, but
+the non-empty-field gate belongs only to prepared mode. This preflight is not a
+new semantic readiness opinion.
+
 ## State, evidence, and reports
 
-`state.py` defines the structured result of each operation. After generation
-or repair, the host attaches the selected `Class.method`, changed files, current
-diff, command log, JUnit counts, and Allure attachment evidence. Any source
-change makes earlier execution evidence stale.
+`state.py` defines the structured result of each operation. An equivalent test
+run, generation, or repair receives the selected `Class.method`, changed files,
+current diff, command log, JUnit counts, and Allure attachment evidence. A
+coverage `GAP` has no execution result to attach. Instead, the host binds that
+handoff to the selected case ID and a source fingerprint, then allows generation
+only while both still match and no workflow source change exists. A missing or
+stale handoff becomes `NOT_VERIFIED`.
 
-Generation runs only the exact selected `Class.method`. If that target fails,
-repair reruns the same method through the existing repair guard. The repair can
-complete only when generation established a failure for that exact target and
-the post-repair run verifies the same target. The repository adapter always
-adds `--tests <package.Class.method>`; it exposes no broad-suite option.
+Coverage executes an exact target only when it finds an equivalent existing
+test. This read-only coverage run skips Kotlin formatting so deduplication cannot
+change source. Generation and repair retain formatting because they may have
+edited permitted test layers. Generation runs only after coverage returns `GAP`, and it also executes
+only the exact selected `Class.method`. If either exact target fails, repair
+reruns the same method through the existing repair guard. The repair can
+complete only when the preceding stage established failure for that exact
+target and the post-repair run verifies the same target. The repository adapter
+always adds `--tests <package.Class.method>`; it exposes no broad-suite option.
 
 Each invocation writes a batch report to
 `.agent-state/qa-workflow/<run-id>/result.json`. Per-case stage reports and
 results are stored under `cases/001-<case-id>/`, `cases/002-<case-id>/`, and so
-on. A case runs only after the preceding case finishes with `REVIEWED`, or with
+on. The batch report records the analysis and implementation models and the
+selected readiness mode. Each per-case report records one of `model`,
+`model_reassessment`, `workbook_status`, or `prepared_preflight` as the
+readiness source. Reused and deterministic readiness also have a standalone
+`readiness.json`; they are recorded stages but are not counted as model graph
+execution. A case runs only after the preceding case finishes with `REVIEWED`, or with
 `ALREADY_COVERED` backed by unchanged source and matching verified exact-target
 evidence; any other status stops the batch before the next case can modify the
 same checkout. Each case keeps a separate plan at
@@ -191,8 +222,17 @@ worksheets with their standard columns: `Case ID`, `Title`, `Description`,
   --case-file ..\test-cases\test-cases.xlsx `
   --case-id FIRST_CASE_ID SECOND_CASE_ID `
   --provider anthropic `
-  --model YOUR_MODEL_ID
+  --model claude-opus-5 `
+  --analysis-model claude-sonnet-5 `
+  --prepared-cases
 ```
+
+Use `--reassess-readiness` for the full teaching readiness flow. Without either
+readiness flag, cases without a stored status run model readiness and cases with
+a status reuse it. For Anthropic, omitting `--analysis-model` still uses
+`claude-sonnet-5` for readiness, coverage, and review. For OpenAI, it keeps the
+older single-model behavior by using `--model` for every role unless an analysis
+model is supplied.
 
 On macOS or Linux, use `./.venv/bin/python`, forward slashes, and shell line
 continuations. Inspect the batch `result.json`, each per-case result and stage

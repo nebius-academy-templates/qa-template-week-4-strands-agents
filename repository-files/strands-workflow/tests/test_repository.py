@@ -211,6 +211,21 @@ class RepositoryTests(unittest.TestCase):
         )
         self.assertEqual(self.repo.current_evidence()["status"], "NOT_VERIFIED")
 
+    def test_coverage_run_skips_formatter_and_keeps_source_fingerprint(self):
+        before = self.repo.source_fingerprint()
+
+        with patch("repository.subprocess.run", side_effect=self.process):
+            result = self.repo.run_api_test(TARGET, format_sources=False)
+
+        self.assertEqual((result["status"], result["target_status"]), ("VERIFIED", "VERIFIED"))
+        self.assertFalse(any(":api-tests:ktlintFormat" in command for command in self.calls))
+        self.assertEqual(len(self.calls), 3)
+        self.assertIn("before", self.calls[0])
+        self.assertIn(":api-tests:test", self.calls[1])
+        self.assertIn("after", self.calls[2])
+        self.assertNotIn("format_log", result)
+        self.assertEqual(self.repo.source_fingerprint(), before)
+
     def test_zero_tests_cannot_reuse_previous_reports(self):
         self.evidence()
 
