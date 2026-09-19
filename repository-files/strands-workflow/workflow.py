@@ -191,7 +191,7 @@ async def _close_model_clients(agents: dict) -> None:
             logger.warning("Could not close a workflow model client", exc_info=True)
 
 
-def build_graph(agents: dict, repository):
+def build_graph(agents: dict):
     """Repair owns its existing run loop and budgets; the graph chooses stages."""
     builder = GraphBuilder()
     # Practice: register review, connect verified results, and check freshness before review.
@@ -219,6 +219,7 @@ def build_graph(agents: dict, repository):
     graph = builder.build()
 
     def after_node(event):
+        repository = event.invocation_state["repository"]
         node = event.source.state.results[event.node_id]
         result = node.result
         if getattr(result, "structured_output", None) is None:
@@ -292,7 +293,7 @@ def run_workflow(
             },
         )
 
-    graph = build_graph(agents, repository)
+    graph = build_graph(agents)
     task = (
         f"Complete the API automation workflow for {repository.case_id}. "
         "The request includes the selected readiness decision, automation of this case "
@@ -309,7 +310,7 @@ def run_workflow(
     error = None
     error_message = None
     try:
-        graph(task)
+        graph(task, invocation_state={"repository": repository, "case": case})
     except Exception as failure:
         error = type(failure).__name__
         error_message = str(failure)

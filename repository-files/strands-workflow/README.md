@@ -62,7 +62,7 @@ The implementation keeps three concerns separate:
 | Concern | Location | Effect |
 |---|---|---|
 | Model instructions | `agents.py` and the installed Markdown procedures | Define what each model call evaluates or produces. |
-| Available operations | Tool functions in `agents.py`, backed by `repository.py` | Bound which files and commands each agent can use. |
+| Available operations | Tool functions in `repository_tools.py`, backed by `repository.py` | Bound which files and commands each agent can use. |
 | Execution dependencies | Edges and conditions in `workflow.py` | Decide which completed result can start another operation. |
 
 `AgentSkills` loads `gen-api-test` and `test-repair` instructions on demand.

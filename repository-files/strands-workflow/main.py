@@ -221,7 +221,6 @@ def run_cases(
                 agents = make_agents(
                     adapter,
                     role_model,
-                    case.text,
                     include_readiness=assessment is None,
                 )
             phase = "workflow"
