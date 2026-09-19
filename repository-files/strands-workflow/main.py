@@ -15,6 +15,7 @@ from repository import Repository
 from state import Assessment
 from telemetry import NativeTelemetry
 from workflow import run_workflow
+from workspace import ensure_safe_path
 
 ANALYSIS_ROLES = frozenset({"readiness", "review"})
 CASE_OUTCOMES = frozenset(
@@ -33,9 +34,12 @@ CASE_OUTCOMES = frozenset(
 
 def has_unfinished_repair(repository: Path) -> bool:
     """Read queue state using the installed repair hook's parser and terminal states."""
-    if not (repository / ".agent-state/test_repair.json").exists():
+    repository = repository.resolve(strict=True)
+    queue = ensure_safe_path(repository, Path(".agent-state/test_repair.json"))
+    if not queue.exists():
         return False
-    hook = runpy.run_path(str(repository / ".agents/hooks/test_repair.py"))
+    hook_path = ensure_safe_path(repository, Path(".agents/hooks/test_repair.py"))
+    hook = runpy.run_path(str(hook_path))
     hook["configure_project_root"](repository)
     return any(
         item["state"] not in hook["TERMINAL_STATES"] for item in hook["load_queue"]()["items"]
