@@ -4,18 +4,18 @@ This starter coordinates assigned API cases through readiness, generation and
 fresh exact execution, conditional repair, and a final check against each case.
 Cases run in the supplied order with a new graph and repository adapter per case.
 It uses the documents, skills, hook, Kotlin suite and workbook already installed
-in the practice repository.
+in the project repository.
 
 The starter supplies four roles. Its graph connects readiness, generation and
 conditional repair. The review agent is deliberately not registered as a graph
-node until the review-route practice is completed. Until then, a passing test
-ends as `VERIFIED` with review still pending. The batch may continue to later
+node. Until the review route is connected, a passing test ends as `VERIFIED`
+with review still pending. The batch may continue to later
 cases, but those results remain unresolved until reviewed.
 
 ## Prerequisites
 
 Use Python 3.11 or newer. Before running the application, verify that the
-practice repository contains:
+project repository contains:
 
 - `AGENTS.md` and `agent_docs/AI_POLICY.md`;
 - `agent_docs/task-automation-readiness-instructions.md`;
@@ -123,7 +123,7 @@ For workbook input, the host reuses only exact readiness values from
 readiness results. The default mode calls the readiness model only when no
 reusable status exists. Pass `--reassess-readiness` to request a new assessment
 even when the workbook has a status. For a curated batch whose cases have
-already been prepared in the course workbook, pass `--prepared-cases`. This mode
+already been prepared in the workbook, pass `--prepared-cases`. This mode
 accepts XLSX input only. Statusless cases then use deterministic workbook shape
 checks plus non-empty values in the required selected-case fields, and continue
 to generation without a separate readiness model call. Ordinary workbook loading
@@ -199,7 +199,7 @@ the existing repair state and start a new invocation.
 
 Anthropic runs enable provider-side ephemeral caching for the stable system
 prompt and tool definitions. The default TTL is five minutes. Set
-`ANTHROPIC_CACHE_TTL=1h` when a longer exercise window is appropriate. A cache
+`ANTHROPIC_CACHE_TTL=1h` when a longer cache lifetime is appropriate. A cache
 hit reduces repeated prompt processing; it does not preserve workflow state or
 prove a test result.
 
@@ -222,7 +222,7 @@ application validates this setting and does not rewrite the process
 environment. The model-call limit remains active independently of whether
 native tracing is enabled.
 
-## Practice: Add the Review Route
+## Review configuration
 
 Connect the supplied `review` agent in `workflow.py`. A verified generation or
 verified repair may proceed to review. Immediately before review starts, read
@@ -233,7 +233,7 @@ results must reach review with the prepared packet, while missing or stale
 evidence must keep review from running. A review finding must produce
 `CHANGES_REQUESTED`.
 
-## Capstone: Run an Evidence-Backed Workflow
+## Run
 
 Use the completed graph with one or more assigned complete API cases. Start the
 backend, set the provider key, and run from `strands-workflow/`. Supply case IDs
@@ -255,12 +255,11 @@ worksheets with their standard columns: `Case ID`, `Title`, `Description`,
   --prepared-cases
 ```
 
-Use `--reassess-readiness` for the full teaching readiness flow. Without either
-readiness flag, cases without a stored status run model readiness and cases with
-a status reuse it. For Anthropic, omitting `--analysis-model` still uses
-`claude-sonnet-5` for readiness and review. For OpenAI, it keeps the
-older single-model behavior by using `--model` for every role unless an analysis
-model is supplied.
+The readiness options are described under
+[How the application is assembled](#how-the-application-is-assembled).
+For Anthropic, omitting `--analysis-model` uses `claude-sonnet-5` for readiness
+and review. For OpenAI, `--model` is used for every role unless
+`--analysis-model` is supplied.
 
 On macOS or Linux, use `./.venv/bin/python`, forward slashes, and shell line
 continuations. Inspect the batch `result.json`, each per-case result and stage
