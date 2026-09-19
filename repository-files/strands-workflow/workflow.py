@@ -252,20 +252,13 @@ def _write_initial_readiness(repository, assessment: Assessment, source: str) ->
     return stage
 
 
-def _write_stopped_readiness(repository, assessment: Assessment, readiness_source: str) -> dict:
-    readiness = _write_initial_readiness(repository, assessment, readiness_source)
+def _write_result(repository, readiness_source: str, outcome: dict) -> dict:
     report = {
         "case_id": repository.case_id,
         "skip_implemented": repository.skip_implemented,
-        "status": assessment.status,
-        "graph_status": "skipped",
-        "error_type": None,
-        "execution_order": [],
         "readiness_source": readiness_source,
         "changed_files": sorted(repository.changed_files),
-        "evidence": repository.current_evidence(),
-        "stages": {"readiness": readiness},
-        "next_action": _final_next_action(assessment.status),
+        **outcome,
     }
     path = repository.output_dir / "result.json"
     path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -279,14 +272,25 @@ def run_workflow(
     initial_assessment: Assessment | None = None,
     readiness_source: str = "model",
 ) -> dict:
-    if initial_assessment is not None and initial_assessment.status != "READY":
-        return _write_stopped_readiness(repository, initial_assessment, readiness_source)
-
     initial_readiness = (
         _write_initial_readiness(repository, initial_assessment, readiness_source)
         if initial_assessment is not None
         else None
     )
+    if initial_assessment is not None and initial_assessment.status != "READY":
+        return _write_result(
+            repository,
+            readiness_source,
+            {
+                "status": initial_assessment.status,
+                "graph_status": "skipped",
+                "error_type": None,
+                "execution_order": [],
+                "evidence": repository.current_evidence(),
+                "stages": {"readiness": initial_readiness},
+                "next_action": _final_next_action(initial_assessment.status),
+            },
+        )
 
     graph = build_graph(agents, repository)
     task = (
@@ -351,14 +355,10 @@ def run_workflow(
             status = "VERIFICATION_INCOMPLETE"
             blocking_reason = "Repair evidence does not verify the failed exact target"
     report = {
-        "case_id": repository.case_id,
-        "skip_implemented": repository.skip_implemented,
         "status": status,
         "graph_status": state.status.value,
         "error_type": error,
         "execution_order": order,
-        "readiness_source": readiness_source,
-        "changed_files": sorted(repository.changed_files),
         "evidence": evidence,
         "stages": stages,
         "next_action": _final_next_action(status, final_target),
@@ -372,6 +372,4 @@ def run_workflow(
             order[-1] if order else None,
         )
         report["error_log"] = "error.log"
-    path = repository.output_dir / "result.json"
-    path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
-    return report
+    return _write_result(repository, readiness_source, report)

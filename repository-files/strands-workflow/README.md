@@ -9,7 +9,8 @@ in the practice repository.
 The starter supplies four roles. Its graph connects readiness, generation and
 conditional repair. The review agent is deliberately not registered as a graph
 node until the review-route practice is completed. Until then, a passing test
-ends as `VERIFIED` with review still pending, and the batch stops at that case.
+ends as `VERIFIED` with review still pending. The batch may continue to later
+cases, but those results remain unresolved until reviewed.
 
 ## Prerequisites
 
@@ -73,7 +74,7 @@ of a successful run. The host application supplies those operations separately.
 | `readiness` | Existing readiness instructions | Read and search repository sources. |
 | `generation` | `gen-api-test` through `AgentSkills` | Check the assigned ID, create or validate the plan before changes, implement the selected case and run its exact method. |
 | `repair` | `test-repair` through `AgentSkills` | Diagnose the selected target, use the existing queue, edit permitted test layers, and rerun that exact target. |
-| `review` | Case-check section of `automate-test-case` | Receive one host-prepared packet with the complete case, final test, helpers, optional plan, and exact-target evidence. It has no repository tools and may make at most two model calls. |
+| `review` | Case-check section of `automate-test-case` | Receive the complete case, final test, optional plan and exact-target evidence; inspect called helpers and contracts with restricted `read_file` and `search_text` tools. It may make at most 12 model calls. |
 
 Every role also receives the complete original case, `AGENTS.md`, and
 `agent_docs/AI_POLICY.md`. Generation implements the assigned case under its
@@ -94,13 +95,14 @@ verification; without the flag, existing tests also require fresh execution.
 Missing, stale or mismatched execution proof produces `VERIFICATION_INCOMPLETE`.
 
 The supplied review invocation hook replaces graph task history with one
-`_review_packet` JSON message. The packet contains the full selected case; the
-line-numbered target test; its transitive repository-local Kotlin helpers from
-the API test source tree; the case plan when present; whitelisted JUnit and
-Allure summaries; and ordered HTTP request/response attachments. Therefore, once
-the practice connects the review
-node behind the existing freshness gate, the review model does not repeat
-repository discovery or receive a failed pre-repair run or workflow diff.
+`_review_packet` JSON message. The version 2 packet contains the full selected
+case; the line-numbered target test; the case plan when present; whitelisted
+JUnit and Allure summaries; and ordered HTTP request/response attachments.
+The reviewer reads called helpers, including their assertions, and relevant
+contracts through `read_file` and `search_text`. These tools expose source and
+contract documents; execution artifacts remain available only in the packet.
+Packet construction does not parse Kotlin dependencies. A source change during
+review invalidates the final execution claim.
 
 Each packet artifact records its repository path, MIME type, byte size, and
 SHA-256 digest. The run report also records a manifest for the selected JUnit
@@ -160,9 +162,19 @@ selected readiness mode. Each per-case report records one of `model`,
 `model_reassessment`, `workbook_status`, or `prepared_preflight` as the
 readiness source. Reused and deterministic readiness also have a standalone
 `readiness.json`; they are recorded stages but are not counted as model graph
-execution. A case runs only after the preceding case finishes with `REVIEWED`,
-or `ALREADY_IMPLEMENTED` when skipping was explicitly requested. Any other
-status stops the batch before the next case can modify the same checkout. Each case keeps a separate plan at
+execution. Cases that need clarification, have review findings or end with a
+classified repair outcome retain that result while the next independent case
+continues. `VERIFIED` also allows continuation but still requires review.
+Infrastructure errors, incomplete execution evidence, unhandled test failures,
+unknown outcomes and runtime errors stop the batch. Before starting each case,
+the batch reads the installed repair hook's queue. Unfinished work stops
+continuation; the batch does not change or release queue items.
+
+After every case has been processed, `COMPLETED` means every result is `REVIEWED`
+or an explicitly allowed `ALREADY_IMPLEMENTED`. Other outcomes produce
+`COMPLETED_WITH_ISSUES`, a list of `unresolved_case_ids`, and a nonzero CLI exit.
+`STOPPED` retains the remaining case IDs and the reason continuation was blocked.
+Each case keeps a separate plan at
 `agent_docs/automation-plans/<case-id>.md`, so processing a later case does not
 replace an earlier case's plan. Each stage report contains its domain result plus
 duration, cycle count, model latency, token counts, cache counts when the

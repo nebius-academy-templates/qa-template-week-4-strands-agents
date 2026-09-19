@@ -157,10 +157,9 @@ class Repository(RepositoryWorkspace):
             response["data"] = json.loads(result.stdout)
         return response
 
-    def _inventory(self, target: str = "") -> list[dict]:
+    def _inventory(self) -> list[dict]:
         """Read course test metadata; unrelated helper files are not test classes."""
         inventory = []
-        selected_class = target.rsplit(".", 1)[0] if target else ""
         for file in sorted((self.root / "api-tests/src/test/kotlin/tests").rglob("*.kt")):
             text = self.ensure_safe(file).read_text(encoding="utf-8-sig")
             code = mask_kotlin(text)
@@ -168,10 +167,6 @@ class Repository(RepositoryWorkspace):
                 continue
             package = re.search(r"(?m)^package\s+([\w.]+)", code)
             klass = re.search(r"\bclass\s+(\w+)", code)
-            if selected_class and (
-                not package or not klass or package[1] + "." + klass[1] != selected_class
-            ):
-                continue
             if not package or not klass:
                 raise ValueError(f"Cannot identify test class: {file.name}")
             found = []
@@ -257,7 +252,7 @@ class Repository(RepositoryWorkspace):
         return folder
 
     def prepare_review_packet(self, case: str, target: str) -> dict:
-        """Build and persist a bounded, redacted packet for the tool-free review agent."""
+        """Build and persist a bounded, redacted packet for the read-only review agent."""
         if not isinstance(case, str) or not case.strip():
             raise ValueError("Review requires the complete selected case")
         validate_test_target(target)
@@ -269,8 +264,8 @@ class Repository(RepositoryWorkspace):
         ):
             raise ValueError("Review requires current VERIFIED evidence for the exact target")
         folder = self._review_run_folder(evidence)
-        matching = [self._selected_test(target)]
-        artifacts = self.evidence_archive.select(folder, matching, target)
+        selected_test = self._selected_test(target)
+        artifacts = self.evidence_archive.select(folder, selected_test)
         junit = artifacts["selected_junit"]
         allure = artifacts["selected_allure"]
         if len(junit) != 1 or len(allure) != 1:
@@ -283,13 +278,13 @@ class Repository(RepositoryWorkspace):
             raise ValueError("Exact execution evidence changed after its verified run")
 
         packet = build_review_packet(
-            self, case, target, evidence, matching[0], artifacts, junit_status
+            self, case, target, evidence, selected_test, artifacts, junit_status
         )
         if manifest != evidence_manifest_from_packet(packet):
             raise ValueError("Exact execution evidence changed after its verified run")
 
         # One final check rejects archive, source or run changes during assembly.
-        refreshed = self.evidence_archive.select(folder, matching, target)
+        refreshed = self.evidence_archive.select(folder, selected_test)
         if manifest != self.evidence_archive.manifest(refreshed, target):
             raise ValueError("Exact execution evidence changed while assembling the review packet")
         if self.current_evidence() != evidence:
@@ -375,7 +370,7 @@ class Repository(RepositoryWorkspace):
                     shutil.copy2(file, restored)
 
     def run_api_test(self, target: str, *, format_sources: bool = True) -> dict:
-        expected = [self._selected_test(target)]
+        selected_test = self._selected_test(target)
         folder = self.output_dir / ("run-" + uuid.uuid4().hex)
         folder.mkdir()
         (folder / "suite.log").write_text("API test command has not run.\n", encoding="utf-8")
@@ -419,7 +414,7 @@ class Repository(RepositoryWorkspace):
             # Formatting is a non-test command. Complete it before PRE starts the
             # guarded exact-target run, so a formatter failure consumes no run budget.
             if format_sources:
-                run = self._format_api_tests(wrapper, folder, expected[0]["path"])
+                run = self._format_api_tests(wrapper, folder, selected_test["path"])
                 summary["format_log"] = relative("format.log")
                 summary["format_exit_code"] = run.returncode
                 if run.returncode:
@@ -455,7 +450,7 @@ class Repository(RepositoryWorkspace):
                             copy.parent.mkdir(parents=True, exist_ok=True)
                             shutil.copy2(file, copy)
                 summary.update(
-                    self.evidence_archive.summarize(folder, expected, target, run.returncode)
+                    self.evidence_archive.summarize(folder, selected_test, run.returncode)
                 )
         except ProcessCleanupError as error:
             execution_stopped = False
