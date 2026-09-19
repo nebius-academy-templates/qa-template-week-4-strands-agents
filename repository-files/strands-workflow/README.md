@@ -104,9 +104,11 @@ repository discovery or receive a failed pre-repair run or workflow diff.
 
 Each packet artifact records its repository path, MIME type, byte size, and
 SHA-256 digest. The run report also records a manifest for the selected JUnit
-testcase, complete raw Allure result, and each ordered HTTP attachment; review
-recomputes that manifest before and after packet assembly. Raw Allure parameters,
-details, host/thread metadata, and free-form names are not model input. HTTP HTML
+testcase, complete raw Allure result, and each ordered HTTP attachment. Review
+compares the assembled packet with that manifest, then rechecks the archive and
+current execution evidence before returning it. The Allure summary and hash use
+the same captured bytes. Raw Allure parameters, details, host/thread metadata,
+and free-form names are not model input. HTTP HTML
 is converted to text. Authorization, cookie, API-key, sandbox-session, and token
 values are redacted before model input. Missing, ambiguous, unsafe, non-text,
 stale, or oversized required evidence stops review instead of producing a
@@ -136,8 +138,9 @@ integrates guarded execution, and `evidence.py` validates archived JUnit and All
 results against the selected target and current source fingerprint.
 
 Generation and repair format the permitted API test layers before PRE and run
-only the selected `package.Class.method`. Repair starts only from a confirmed
-failure of that method and must verify the same target. A full regression suite
+only the selected `package.Class.method`. Formatter changes to files outside the
+selected test and files edited by this workflow are restored. Repair starts only
+from a confirmed failure of that method and must verify the same target. A full regression suite
 is a separate request. Before each run, existing reports are archived; only fresh
 matching reports can verify the test. Previous unrelated results are preserved
 for the repair queue.

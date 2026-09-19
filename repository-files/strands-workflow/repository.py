@@ -266,7 +266,6 @@ class Repository(RepositoryWorkspace):
             evidence.get("status") == "VERIFIED"
             and evidence.get("target_status") == "VERIFIED"
             and evidence.get("target") == target
-            and evidence.get("source_digest") == self.source_fingerprint()
         ):
             raise ValueError("Review requires current VERIFIED evidence for the exact target")
         folder = self._review_run_folder(evidence)
@@ -280,30 +279,27 @@ class Repository(RepositoryWorkspace):
         if junit_status != "passed" or allure[0]["report"].get("status") != "passed":
             raise ValueError("Review requires passing exact-target JUnit and Allure evidence")
         manifest = evidence.get("evidence_manifest")
-        if not isinstance(manifest, dict) or manifest != self.evidence_archive.manifest(
-            artifacts, target
-        ):
+        if not isinstance(manifest, dict):
             raise ValueError("Exact execution evidence changed after its verified run")
 
         packet = build_review_packet(
             self, case, target, evidence, matching[0], artifacts, junit_status
         )
         if manifest != evidence_manifest_from_packet(packet):
-            raise ValueError("Review packet evidence differs from its verified run")
+            raise ValueError("Exact execution evidence changed after its verified run")
 
-        # Packet assembly reads source and artifact files. Recompute both identities
-        # afterwards so a concurrent mutation cannot become review input.
-        if evidence["source_digest"] != self.source_fingerprint():
-            raise ValueError("Repository sources changed while assembling the review packet")
+        # One final check rejects archive, source or run changes during assembly.
         refreshed = self.evidence_archive.select(folder, matching, target)
         if manifest != self.evidence_archive.manifest(refreshed, target):
             raise ValueError("Exact execution evidence changed while assembling the review packet")
+        if self.current_evidence() != evidence:
+            raise ValueError("Repository sources or run changed while assembling the review packet")
 
         encoded = encode_review_packet(packet)
         (self.output_dir / "review-packet.json").write_bytes(encoded + b"\n")
         return packet
 
-    def _format_api_tests(self, wrapper: str, folder: Path):
+    def _format_api_tests(self, wrapper: str, folder: Path, selected_path: str):
         """Capture module formatting in the review diff and restore out-of-scope edits."""
 
         def sources():
@@ -314,6 +310,7 @@ class Repository(RepositoryWorkspace):
             }
 
         before = sources()
+        permitted = self.changed_files | {selected_path}
         run = self._run([wrapper, "--no-daemon", ":api-tests:ktlintFormat"], folder / "format.log")
         after = sources()
         changed = sorted(
@@ -330,6 +327,13 @@ class Repository(RepositoryWorkspace):
                 elif file.exists():
                     file.unlink()
                 rejected.append(name)
+                continue
+            if name not in permitted:
+                file = self.path_for(name)
+                if name in before:
+                    file.write_bytes(before[name])
+                elif file.exists():
+                    file.unlink()
                 continue
             self._original.setdefault(name, before.get(name, b"").decode("utf-8-sig"))
             self.changed_files.add(name)
@@ -415,7 +419,7 @@ class Repository(RepositoryWorkspace):
             # Formatting is a non-test command. Complete it before PRE starts the
             # guarded exact-target run, so a formatter failure consumes no run budget.
             if format_sources:
-                run = self._format_api_tests(wrapper, folder)
+                run = self._format_api_tests(wrapper, folder, expected[0]["path"])
                 summary["format_log"] = relative("format.log")
                 summary["format_exit_code"] = run.returncode
                 if run.returncode:
