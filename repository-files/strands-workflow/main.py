@@ -1,4 +1,4 @@
-"""Run the course QA workflow against an explicitly selected practice checkout."""
+"""Run the QA workflow in an explicitly selected repository."""
 
 from __future__ import annotations
 
