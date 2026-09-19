@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable
+from pathlib import Path
 
 from repository import Repository
 from safety import ModelCallLimit
@@ -121,6 +122,81 @@ The host writes the stage reports from your structured result.
     def search_text(pattern: str, path: str = ".") -> dict:
         """Search repository text with a regular expression, returning path and line."""
         return repository.search_text(pattern, path)
+
+    def reviewer_tools() -> list:
+        source_roots = tuple(
+            repository.root / path
+            for path in (
+                "api-tests/src/test",
+                "appium-tests/src/test",
+                "app/src",
+                "fake-api/src",
+                "agent_docs",
+                "docs",
+                ".agents/skills",
+            )
+        )
+        documents = {
+            repository.root / path
+            for path in (
+                "AGENTS.md",
+                "AI_POLICY.md",
+                "baseline_report.md",
+                "README.md",
+                "api-tests/README.md",
+                "appium-tests/README.md",
+                "fake-api/openapi.yaml",
+                "automation_plan.api.md.template",
+                "automation_plan.mobile.md.template",
+            )
+        }
+
+        def permitted(file: Path) -> bool:
+            if file.is_relative_to(repository.output_dir) or not repository.is_readable(file):
+                return False
+            if file in documents:
+                return True
+            return any(file.is_relative_to(root) for root in source_roots) and (
+                file.suffix.lower() in {".kt", ".kts", ".java", ".xml", ".yaml", ".yml", ".md"}
+                or file.name.endswith(".md.template")
+            )
+
+        @tool
+        def read_file(path: str, start_line: int = 1, line_count: int = 200) -> dict:
+            """Read sources or contracts; execution artifacts are available only in the packet."""
+            file = repository.path_for(path)
+            if not permitted(file):
+                raise ValueError("Reviewer tools may read only source and contract documents")
+            return repository.read_file(path, start_line, line_count)
+
+        @tool
+        def search_text(pattern: str, path: str = ".") -> dict:
+            """Search source and contract documents without reading logs or execution artifacts."""
+            base = repository.path_for(path)
+            roots = [
+                base if base.is_relative_to(root) else root
+                for root in source_roots
+                if base.is_relative_to(root) or root.is_relative_to(base)
+            ]
+            roots.extend(file for file in documents if file == base or file.is_relative_to(base))
+            if not roots:
+                raise ValueError("Reviewer tools may search only source and contract documents")
+            matches = []
+            for root in sorted(set(roots)):
+                if not root.exists():
+                    continue
+                for file in repository.files(root.relative_to(repository.root).as_posix()):
+                    if not permitted(file):
+                        continue
+                    result = repository.search_text(
+                        pattern, file.relative_to(repository.root).as_posix()
+                    )
+                    matches.extend(result["matches"])
+                    if result["truncated"] or len(matches) >= 100:
+                        return {"matches": matches[:100], "truncated": True}
+            return {"matches": matches, "truncated": False}
+
+        return [read_file, search_text]
 
     @tool
     def write_file(path: str, content: str) -> dict:
@@ -298,11 +374,17 @@ Follow this operation from the installed automate-test-case instructions:
 
 {case_check}
 
-Use only the host-prepared `_review_packet` in the user message. It contains the
-complete case, line-numbered final test and helpers, optional case plan, and the
-current exact-target JUnit, Allure and ordered HTTP evidence. Do not request or
-infer repository content outside that packet. Do not execute code, write fixes
-or add an approval gate.
+Start with the host-prepared `_review_packet` in the user message. It contains the
+complete case, line-numbered final test, optional case plan, and the
+current exact-target JUnit, Allure and ordered HTTP evidence. Use read_file and
+search_text to inspect the helpers called by the test, including their assertions,
+and relevant contract details. Helper source is not bundled in the packet.
+These tools expose source and contract text only; execution artifacts are available
+only in the prepared packet.
+Keep execution claims tied to the packet's exact target and run; another report
+cannot replace that evidence. Cite any additional sources used. If context remains
+missing or conflicts with the packet, report it as unverified instead of guessing.
+Do not execute code, write fixes or add an approval gate.
 For each gap, put the original case requirement in Finding.check, cite a relevant
 test or helper path and source line, and explain the missing behavior, consequence
 and required change. Check helper behavior before concluding an assertion is absent.
@@ -312,10 +394,10 @@ unverified is 'none' or a concrete claim whose evidence is missing; question is
 'none' or a material question unresolved by the supplied case and repository.
 Keep a passing execution result distinct from full conformance to the case.
 """,
-            [],
+            reviewer_tools(),
             ReviewResult,
             hooks=[ReviewPacketInput(repository, case)],
-            model_call_limit=2,
+            model_call_limit=12,
         ),
     }
     if include_readiness:

@@ -60,7 +60,7 @@ class ExecutionEvidence:
             return "response"
         return ""
 
-    def select(self, folder: Path, expected: list[dict], target: str) -> dict:
+    def select(self, folder: Path, selected_test: dict) -> dict:
         """Parse and match the exact artifacts used by evidence and review."""
         cases = []
         for candidate in sorted((folder / "junit").glob("*.xml")):
@@ -82,24 +82,22 @@ class ExecutionEvidence:
                 raise ValueError("Allure results require a test fullName and status string")
             allure.append({"path": file, "report": report, "raw": raw})
 
-        matches = {}
-        for item in expected:
-            junit_names = {item["method"], item["method"] + "()", item["display"]}
-            matches[item["target"]] = {
-                "junit": [
-                    record
-                    for record in cases
-                    if record["case"].get("classname") == item["class"]
-                    and record["case"].get("name") in junit_names
-                ],
-                "allure": [
-                    record
-                    for record in allure
-                    if record["report"].get("fullName") == item["target"]
-                ],
-            }
-
-        selected = matches.get(target, {"junit": [], "allure": []})
+        junit_names = {
+            selected_test["method"],
+            selected_test["method"] + "()",
+            selected_test["display"],
+        }
+        selected_junit = [
+            record
+            for record in cases
+            if record["case"].get("classname") == selected_test["class"]
+            and record["case"].get("name") in junit_names
+        ]
+        selected_allure = [
+            record
+            for record in allure
+            if record["report"].get("fullName") == selected_test["target"]
+        ]
         attachments = []
 
         def collect(node) -> None:
@@ -135,14 +133,13 @@ class ExecutionEvidence:
             for step in steps:
                 collect(step)
 
-        if len(selected["allure"]) == 1:
-            collect(selected["allure"][0]["report"])
+        if len(selected_allure) == 1:
+            collect(selected_allure[0]["report"])
         return {
             "cases": cases,
             "allure": allure,
-            "matches": matches,
-            "selected_junit": selected["junit"],
-            "selected_allure": selected["allure"],
+            "selected_junit": selected_junit,
+            "selected_allure": selected_allure,
             "attachments": attachments,
         }
 
@@ -186,11 +183,11 @@ class ExecutionEvidence:
     def summarize(
         self,
         folder: Path,
-        expected: list[dict],
-        target: str,
+        selected_test: dict,
         exit_code: int,
     ) -> dict:
-        artifacts = self.select(folder, expected, target)
+        target = selected_test["target"]
+        artifacts = self.select(folder, selected_test)
         cases = artifacts["cases"]
         allure = artifacts["allure"]
 
@@ -198,22 +195,17 @@ class ExecutionEvidence:
         for record in cases:
             counts[self.junit_status(record["case"])] += 1
         reasons = []
-        inventory_mismatch = (
-            not expected or len(cases) != len(expected) or len(allure) != len(expected)
-        )
+        inventory_mismatch = len(cases) != 1 or len(allure) != 1
         if inventory_mismatch:
             reasons.append("JUnit/Allure counts do not match the selected target")
-        for item in expected:
-            matching = artifacts["matches"][item["target"]]
-            if (
-                len(matching["junit"]) != 1
-                or len(matching["allure"]) != 1
-                or matching["allure"][0]["report"].get("status") != "passed"
-            ):
-                reasons.append(f"Missing, ambiguous, or unsuccessful evidence for {item['target']}")
-
         selected_allure = artifacts["selected_allure"]
         selected_junit = artifacts["selected_junit"]
+        if (
+            len(selected_junit) != 1
+            or len(selected_allure) != 1
+            or selected_allure[0]["report"].get("status") != "passed"
+        ):
+            reasons.append(f"Missing, ambiguous, or unsuccessful evidence for {target}")
         attachments = artifacts["attachments"]
         target_reasons = [
             "Missing or unsafe HTTP attachment" for attachment in attachments if attachment["error"]

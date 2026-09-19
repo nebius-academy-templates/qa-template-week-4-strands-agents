@@ -66,6 +66,24 @@ def _is_link_or_junction(path: Path) -> bool:
     return bool(attributes & _WINDOWS_REPARSE_POINT)
 
 
+def ensure_safe_path(root: Path, path: Path) -> Path:
+    """Reject paths that escape the root or pass through a filesystem link."""
+    path = Path(path)
+    if not path.is_absolute():
+        path = root / path
+    try:
+        path.resolve().relative_to(root)
+    except ValueError as error:
+        raise ValueError("path must remain inside the repository") from error
+
+    for candidate in (path, *path.parents):
+        if candidate == root:
+            break
+        if _is_link_or_junction(candidate):
+            raise ValueError("repository tools do not follow symlinks or junctions")
+    return path
+
+
 def _portable_parts(value: str) -> tuple[str, ...]:
     if not value or "\0" in value:
         raise ValueError("path cannot be empty or contain a NUL byte")
@@ -120,21 +138,7 @@ class RepositoryWorkspace:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def ensure_safe(self, path: Path) -> Path:
-        """Reject paths that escape the root or pass through a filesystem link."""
-        path = Path(path)
-        if not path.is_absolute():
-            path = self.root / path
-        try:
-            path.resolve().relative_to(self.root)
-        except ValueError as error:
-            raise ValueError("path must remain inside the repository") from error
-
-        for candidate in (path, *path.parents):
-            if candidate == self.root:
-                break
-            if _is_link_or_junction(candidate):
-                raise ValueError("repository tools do not follow symlinks or junctions")
-        return path
+        return ensure_safe_path(self.root, path)
 
     def path_for(self, value: str) -> Path:
         """Resolve a portable repository-relative tool path."""

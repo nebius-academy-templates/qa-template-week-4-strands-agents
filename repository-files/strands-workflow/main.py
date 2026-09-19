@@ -1,10 +1,11 @@
-"""Run the course QA workflow against an explicitly selected practice checkout."""
+"""Run the QA workflow in an explicitly selected repository."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import re
+import runpy
 from pathlib import Path
 from uuid import uuid4
 
@@ -14,8 +15,35 @@ from repository import Repository
 from state import Assessment
 from telemetry import NativeTelemetry
 from workflow import run_workflow
+from workspace import ensure_safe_path
 
 ANALYSIS_ROLES = frozenset({"readiness", "review"})
+CASE_OUTCOMES = frozenset(
+    {
+        "REVIEWED",
+        "VERIFIED",
+        "BLOCKED",
+        "NEEDS_CLARIFICATION",
+        "CHANGES_REQUESTED",
+        "PRODUCT_BUG",
+        "NEEDS_INVESTIGATION",
+        "EXHAUSTED",
+    }
+)
+
+
+def has_unfinished_repair(repository: Path) -> bool:
+    """Read queue state using the installed repair hook's parser and terminal states."""
+    repository = repository.resolve(strict=True)
+    queue = ensure_safe_path(repository, Path(".agent-state/test_repair.json"))
+    if not queue.exists():
+        return False
+    hook_path = ensure_safe_path(repository, Path(".agents/hooks/test_repair.py"))
+    hook = runpy.run_path(str(hook_path))
+    hook["configure_project_root"](repository)
+    return any(
+        item["state"] not in hook["TERMINAL_STATES"] for item in hook["load_queue"]()["items"]
+    )
 
 
 def resolve_analysis_model(provider: str, model: str, analysis_model: str | None) -> str:
@@ -105,6 +133,9 @@ def run_cases(
     output_dir = repository / ".agent-state" / "qa-workflow" / uuid4().hex
     output_dir.mkdir(parents=True)
     case_results = []
+    accepted = {"REVIEWED"}
+    if skip_implemented:
+        accepted.add("ALREADY_IMPLEMENTED")
     stopped = False
     report_path = output_dir / "result.json"
     report = {
@@ -132,6 +163,9 @@ def run_cases(
             processed_case_ids=processed,
             remaining_case_ids=case_ids[len(processed) :],
             stopped_after=processed[-1] if stopped and processed else None,
+            unresolved_case_ids=[
+                result["case_id"] for result in case_results if result["status"] not in accepted
+            ],
         )
         temporary = report_path.with_suffix(".tmp")
         temporary.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -156,6 +190,11 @@ def run_cases(
     try:
         telemetry = NativeTelemetry(export=export_otel)
         for index, case in enumerate(cases, 1):
+            phase = "repair_queue"
+            if has_unfinished_repair(repository):
+                stopped = True
+                report["stop_reason"] = "Resolve unfinished repair queue work before continuing."
+                break
             case_id = case.case_id
             report["active_case_id"] = case_id
             save_report()
@@ -202,10 +241,9 @@ def run_cases(
                     "changed_files": result.get("changed_files", []),
                 }
             )
-            if result.get("status") != "REVIEWED" and not (
-                skip_implemented and result.get("status") == "ALREADY_IMPLEMENTED"
-            ):
+            if result.get("error_type") or result.get("status") not in CASE_OUTCOMES | accepted:
                 stopped = True
+                report["stop_reason"] = result["next_action"]
             report["active_case_id"] = None
             save_report()
             if stopped:
@@ -221,7 +259,13 @@ def run_cases(
             except Exception as error:
                 record_error(error, "telemetry_close")
         complete = not stopped and len(case_results) == len(case_ids)
-        report["batch_status"] = "COMPLETED" if complete else "STOPPED"
+        report["batch_status"] = (
+            "STOPPED"
+            if not complete
+            else "COMPLETED_WITH_ISSUES"
+            if report["unresolved_case_ids"]
+            else "COMPLETED"
+        )
         save_report()
     return report, report_path
 

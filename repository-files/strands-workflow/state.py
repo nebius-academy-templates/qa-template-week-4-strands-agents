@@ -4,7 +4,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-# Statuses the host derives from execution evidence; an agent cannot claim them.
 EVIDENCE_STATUSES = frozenset({"VERIFIED", "FAILED", "VERIFICATION_INCOMPLETE"})
 
 

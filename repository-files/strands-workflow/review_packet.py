@@ -1,4 +1,4 @@
-"""Bounded source and execution evidence passed to the tool-free reviewer."""
+"""Bounded source and execution evidence passed to the read-only reviewer."""
 
 from __future__ import annotations
 
@@ -6,13 +6,12 @@ import hashlib
 import json
 import re
 import xml.etree.ElementTree as ET
-from collections import deque
 from copy import deepcopy
 from html.parser import HTMLParser
 from pathlib import Path
 
 SCHEMA = "ai-for-qa/exact-api-review-packet"
-VERSION = 1
+VERSION = 2
 MAX_PACKET_BYTES = 128 * 1024
 MAX_CASE_BYTES = 32 * 1024
 MAX_SOURCE_BYTES = 64 * 1024
@@ -24,24 +23,6 @@ TEXT_MIME_TYPES = {
     "application/xhtml+xml",
     "application/x-www-form-urlencoded",
 }
-
-_KOTLIN_PACKAGE = re.compile(r"(?m)^\s*package\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*$")
-_KOTLIN_IMPORT = re.compile(
-    r"(?m)^\s*import\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\.\*)?)" r"(?:\s+as\s+[A-Za-z_]\w*)?\s*$"
-)
-_KOTLIN_MODIFIERS = (
-    r"(?:(?:public|internal|private|protected|expect|actual|final|open|abstract|"
-    r"sealed|const|lateinit|override|tailrec|operator|infix|inline|external|suspend)\s+)*"
-)
-_KOTLIN_TYPE = re.compile(
-    rf"(?m)^{_KOTLIN_MODIFIERS}(?:(?:data|value|annotation)\s+)?"
-    r"(?:class|object|interface|typealias|enum\s+class)\s+([A-Za-z_]\w*)"
-)
-_KOTLIN_FUNCTION = re.compile(
-    rf"(?m)^{_KOTLIN_MODIFIERS}fun\s+(?:<[^>\n]+>\s*)?"
-    r"(?:[A-Za-z_][\w<>,?.]*\.)?([A-Za-z_]\w*)\s*\("
-)
-_KOTLIN_PROPERTY = re.compile(rf"(?m)^{_KOTLIN_MODIFIERS}(?:val|var)\s+([A-Za-z_]\w*)")
 
 
 class _HTMLText(HTMLParser):
@@ -148,97 +129,6 @@ def _source(repository, path: Path, mime_type: str) -> dict:
     except UnicodeDecodeError as error:
         raise ValueError("Required review source is not UTF-8 text") from error
     return _artifact(repository.root, path, mime_type, raw, _line_numbered(text))
-
-
-def _kotlin_helpers(repository, target_path: Path) -> list[Path]:
-    """Resolve the target's transitive repository-local Kotlin dependencies."""
-    source_root = repository.ensure_safe(repository.root / "api-tests/src/test/kotlin")
-    target_path = repository.ensure_safe(target_path)
-    records: dict[Path, tuple[str, str]] = {}
-    symbols: dict[str, list[Path]] = {}
-
-    candidates = [target_path, *sorted(source_root.rglob("*.kt"))]
-    for candidate in dict.fromkeys(candidates):
-        file = repository.ensure_safe(candidate)
-        if not file.is_file() or not repository.is_readable(file):
-            raise ValueError("Kotlin review dependency is unavailable")
-        try:
-            text = file.read_text(encoding="utf-8-sig")
-        except UnicodeDecodeError as error:
-            raise ValueError("Kotlin review dependency is not UTF-8 text") from error
-        package_match = _KOTLIN_PACKAGE.search(text)
-        if package_match is None:
-            raise ValueError("Kotlin review dependency has no explicit package")
-        package = package_match[1]
-        records[file] = (package, text)
-        declarations = {
-            *(_KOTLIN_TYPE.findall(text)),
-            *(_KOTLIN_FUNCTION.findall(text)),
-            *(_KOTLIN_PROPERTY.findall(text)),
-        }
-        for declaration in declarations:
-            symbols.setdefault(f"{package}.{declaration}", []).append(file)
-
-    if target_path not in records:
-        raise ValueError("Exact target source is outside the local Kotlin test tree")
-
-    selected: set[Path] = set()
-    visited: set[Path] = set()
-    pending = deque([target_path])
-
-    def add_file(file: Path) -> None:
-        if file != target_path and file not in selected:
-            selected.add(file)
-            pending.append(file)
-
-    def add_symbol(fq_name: str) -> bool:
-        candidates = sorted(set(symbols.get(fq_name, [])))
-        if not candidates:
-            return False
-        # Include every declaration instead of attempting Kotlin overload resolution.
-        # Compilation and the fresh test run establish whether declarations are valid.
-        for candidate in candidates:
-            add_file(candidate)
-        return True
-
-    def add_import(reference: str) -> None:
-        if reference.endswith(".*"):
-            package = reference[:-2]
-            for fq_name in sorted(name for name in symbols if name.rsplit(".", 1)[0] == package):
-                symbol = fq_name.rsplit(".", 1)[1]
-                if re.search(rf"\b{re.escape(symbol)}\b", text):
-                    add_symbol(fq_name)
-            return
-        if add_symbol(reference):
-            return
-        prefixes = sorted(
-            (name for name in symbols if reference.startswith(name + ".")),
-            key=len,
-            reverse=True,
-        )
-        if prefixes:
-            add_symbol(prefixes[0])
-
-    while pending:
-        current = pending.popleft()
-        if current in visited:
-            continue
-        visited.add(current)
-        package, text = records[current]
-        for reference in _KOTLIN_IMPORT.findall(text):
-            add_import(reference)
-
-        for fq_name in sorted(symbols):
-            if re.search(rf"(?<![\w.]){re.escape(fq_name)}(?![\w])", text):
-                add_symbol(fq_name)
-
-        prefix = package + "."
-        for fq_name in sorted(name for name in symbols if name.startswith(prefix)):
-            symbol = fq_name.removeprefix(prefix)
-            if re.search(rf"\b{re.escape(symbol)}\b", text):
-                add_symbol(fq_name)
-
-    return sorted(selected, key=lambda path: path.relative_to(repository.root).as_posix())
 
 
 def _normalized_http_name(kind: str, metadata: dict) -> str:
@@ -387,10 +277,6 @@ def build_review_packet(
         raise ValueError("Review requires ordered HTTP request and response attachment text")
 
     test = _source(repository, repository.path_for(target_record["path"]), "text/x-kotlin")
-    helpers = [
-        _source(repository, file, "text/x-kotlin")
-        for file in _kotlin_helpers(repository, repository.path_for(target_record["path"]))
-    ]
     plan_path = repository.root / f"agent_docs/automation-plans/{repository.case_id}.md"
     plan = _source(repository, plan_path, "text/markdown") if plan_path.is_file() else None
 
@@ -421,7 +307,7 @@ def build_review_packet(
         "version": VERSION,
         "case": {"case_id": repository.case_id, "text": case},
         "target": {"name": target, "source_digest": evidence["source_digest"]},
-        "sources": {"test": test, "helpers": helpers, "plan": plan},
+        "sources": {"test": test, "plan": plan},
         "evidence": {
             "status": "VERIFIED",
             "summary": evidence_summary,
@@ -447,4 +333,4 @@ def build_review_packet(
             "http": http,
         },
     }
-    return deepcopy(packet)
+    return packet
