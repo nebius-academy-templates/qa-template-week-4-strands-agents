@@ -398,7 +398,7 @@ def build_review_packet(
     junit_raw = ET.tostring(junit["case"], encoding="utf-8")
     junit_summary = {"target": target, "status": junit_status}
     allure = artifacts["selected_allure"][0]
-    allure_raw = allure["path"].read_bytes()
+    allure_raw = allure["raw"]
     allure_summary = _safe_allure_summary(allure["report"], attachment_indices)
     evidence_summary = {
         key: deepcopy(evidence[key])
@@ -447,5 +447,4 @@ def build_review_packet(
             "http": http,
         },
     }
-    encode_review_packet(packet)
     return deepcopy(packet)

@@ -51,9 +51,12 @@ class ExecutionEvidence:
     @staticmethod
     def _http_attachment_kind(name: str) -> str:
         lowered = name.lower()
+        # Response reason phrases can contain "request", as in 400 Bad Request.
+        if re.match(r"^http/\d+(?:\.\d+)? [1-5]\d{2}(?:\s|$)", lowered):
+            return "response"
         if "request" in lowered:
             return "request"
-        if "response" in lowered or re.match(r"^http/\d+(?:\.\d+)? [1-5]\d{2}(?:\s|$)", lowered):
+        if "response" in lowered:
             return "response"
         return ""
 
@@ -69,14 +72,15 @@ class ExecutionEvidence:
         allure = []
         for candidate in sorted((folder / "allure").glob("*-result.json")):
             file = self._archive_file(folder, "allure", candidate.name)
-            report = json.loads(file.read_text(encoding="utf-8"))
+            raw = file.read_bytes()
+            report = json.loads(raw.decode("utf-8"))
             if not isinstance(report, dict):
                 raise ValueError("Allure result must be a JSON object")
             if not isinstance(report.get("fullName"), str) or not isinstance(
                 report.get("status"), str
             ):
                 raise ValueError("Allure results require a test fullName and status string")
-            allure.append({"path": file, "report": report})
+            allure.append({"path": file, "report": report, "raw": raw})
 
         matches = {}
         for item in expected:
@@ -158,7 +162,7 @@ class ExecutionEvidence:
             }
 
         junit_raw = ET.tostring(junit[0]["case"], encoding="utf-8")
-        allure_raw = allure[0]["path"].read_bytes()
+        allure_raw = allure[0]["raw"]
         http = []
         for attachment in artifacts["attachments"]:
             if not attachment["kind"]:
