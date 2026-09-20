@@ -5,12 +5,25 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable
-from pathlib import Path
 
 from repository import Repository
+from repository_tools import (
+    edit_file,
+    execution_evidence,
+    list_files,
+    read_file,
+    repair_action,
+    review_read_file,
+    review_search_text,
+    run_api_test,
+    run_repair_test,
+    search_text,
+    workflow_diff,
+    write_file,
+)
 from safety import ModelCallLimit
 from state import Assessment, Implementation, RepairOutcome, ReviewResult
-from strands import Agent, AgentSkills, Skill, tool
+from strands import Agent, AgentSkills, Skill
 from strands.hooks import BeforeInvocationEvent, HookRegistry
 from strands.models import CacheConfig, Model
 from strands.models.anthropic import AnthropicModel
@@ -21,16 +34,15 @@ from strands.tools.executors import SequentialToolExecutor
 class ReviewPacketInput:
     """Replace graph context with one host-prepared, exact-target review packet."""
 
-    def __init__(self, repository: Repository, case: str) -> None:
-        self.repository = repository
-        self.case = case
-
     def register_hooks(self, registry: HookRegistry) -> None:
         registry.add_callback(BeforeInvocationEvent, self.before_invocation)
 
     def before_invocation(self, event: BeforeInvocationEvent) -> None:
-        evidence = self.repository.current_evidence()
-        packet = self.repository.prepare_review_packet(self.case, evidence.get("target", ""))
+        repository = event.invocation_state["repository"]
+        evidence = repository.current_evidence()
+        packet = repository.prepare_review_packet(
+            event.invocation_state["case"], evidence.get("target", "")
+        )
         event.messages = [
             {
                 "role": "user",
@@ -39,7 +51,9 @@ class ReviewPacketInput:
         ]
 
 
-def make_model(provider: str, model_id: str, effort: str = "medium") -> Model:
+def make_model(
+    provider: str, model_id: str, effort: str = "medium", *, max_tokens: int = 16384
+) -> Model:
     """Use the selected provider and model with credentials from the environment."""
     if provider not in {"anthropic", "openai"}:
         raise ValueError("Choose anthropic or openai")
@@ -59,7 +73,7 @@ def make_model(provider: str, model_id: str, effort: str = "medium") -> Model:
         return AnthropicModel(
             client_args=client_args,
             model_id=model_id,
-            max_tokens=8192,
+            max_tokens=max_tokens,
             params={"output_config": {"effort": effort}},
             cache_config=CacheConfig(
                 ttl=cache_ttl,
@@ -80,7 +94,6 @@ def _section(document: str, heading: str) -> str:
 def make_agents(
     repository: Repository,
     model_factory: Callable[[str], Model],
-    case: str,
     include_readiness: bool = True,
 ) -> dict[str, Agent]:
     """Bootstrap trusted local policy and give each role its own tool set."""
@@ -101,165 +114,6 @@ The host writes the stage reports from your structured result.
 
 {policy}
 """
-
-    @tool
-    def read_file(path: str, start_line: int = 1, line_count: int = 200) -> dict:
-        """Read repository text with line numbers; continue reading truncated files.
-
-        Args:
-            path: Repository-relative file path.
-            start_line: First line, starting at one.
-            line_count: Number of lines, at most 400.
-        """
-        return repository.read_file(path, start_line, line_count)
-
-    @tool
-    def list_files(path: str = ".") -> dict:
-        """List readable files under a repository-relative directory or file."""
-        return repository.list_files(path)
-
-    @tool
-    def search_text(pattern: str, path: str = ".") -> dict:
-        """Search repository text with a regular expression, returning path and line."""
-        return repository.search_text(pattern, path)
-
-    def reviewer_tools() -> list:
-        source_roots = tuple(
-            repository.root / path
-            for path in (
-                "api-tests/src/test",
-                "appium-tests/src/test",
-                "app/src",
-                "fake-api/src",
-                "agent_docs",
-                "docs",
-                ".agents/skills",
-            )
-        )
-        documents = {
-            repository.root / path
-            for path in (
-                "AGENTS.md",
-                "AI_POLICY.md",
-                "baseline_report.md",
-                "README.md",
-                "api-tests/README.md",
-                "appium-tests/README.md",
-                "fake-api/openapi.yaml",
-                "automation_plan.api.md.template",
-                "automation_plan.mobile.md.template",
-            )
-        }
-
-        def permitted(file: Path) -> bool:
-            if file.is_relative_to(repository.output_dir) or not repository.is_readable(file):
-                return False
-            if file in documents:
-                return True
-            return any(file.is_relative_to(root) for root in source_roots) and (
-                file.suffix.lower() in {".kt", ".kts", ".java", ".xml", ".yaml", ".yml", ".md"}
-                or file.name.endswith(".md.template")
-            )
-
-        @tool
-        def read_file(path: str, start_line: int = 1, line_count: int = 200) -> dict:
-            """Read sources or contracts; execution artifacts are available only in the packet."""
-            file = repository.path_for(path)
-            if not permitted(file):
-                raise ValueError("Reviewer tools may read only source and contract documents")
-            return repository.read_file(path, start_line, line_count)
-
-        @tool
-        def search_text(pattern: str, path: str = ".") -> dict:
-            """Search source and contract documents without reading logs or execution artifacts."""
-            base = repository.path_for(path)
-            roots = [
-                base if base.is_relative_to(root) else root
-                for root in source_roots
-                if base.is_relative_to(root) or root.is_relative_to(base)
-            ]
-            roots.extend(file for file in documents if file == base or file.is_relative_to(base))
-            if not roots:
-                raise ValueError("Reviewer tools may search only source and contract documents")
-            matches = []
-            for root in sorted(set(roots)):
-                if not root.exists():
-                    continue
-                for file in repository.files(root.relative_to(repository.root).as_posix()):
-                    if not permitted(file):
-                        continue
-                    result = repository.search_text(
-                        pattern, file.relative_to(repository.root).as_posix()
-                    )
-                    matches.extend(result["matches"])
-                    if result["truncated"] or len(matches) >= 100:
-                        return {"matches": matches[:100], "truncated": True}
-            return {"matches": matches, "truncated": False}
-
-        return [read_file, search_text]
-
-    @tool
-    def write_file(path: str, content: str) -> dict:
-        """Write an allowed API test-layer file or this case's automation plan as UTF-8."""
-        return repository.write_file(path, content)
-
-    @tool
-    def edit_file(path: str, old_text: str, new_text: str) -> dict:
-        """Replace one exact text occurrence in an allowed API test-layer or plan file."""
-        return repository.edit_file(path, old_text, new_text)
-
-    @tool
-    def workflow_diff() -> str:
-        """Read the complete diff produced by this workflow, including new files."""
-        return repository.diff()
-
-    @tool
-    def execution_evidence() -> dict:
-        """Read the latest run counts, target result and artifact paths; detect stale proof."""
-        return repository.current_evidence()
-
-    @tool
-    def run_api_test(target: str) -> dict:
-        """Format the API module and run the selected method fresh.
-
-        Args:
-            target: Fully qualified package.Class.method belonging to the supplied case.
-        """
-        return repository.run_api_test(target)
-
-    repair_target = ""
-
-    def selected_repair_target() -> str:
-        nonlocal repair_target
-        if not repair_target:
-            repair_target = (repository.last_run or {}).get("target", "")
-        if not repair_target:
-            raise ValueError("Repair requires the exact target from the preceding exact run")
-        return repair_target
-
-    @tool
-    def run_repair_test(target: str) -> dict:
-        """Format the API module and run the original target through its PRE/POST guard.
-
-        Args:
-            target: The same fully qualified package.Class.method as the preceding failed run.
-        """
-        if target != selected_repair_target():
-            raise ValueError("Repair may run only the original workflow target")
-        return repository.run_api_test(target)
-
-    @tool
-    def repair_action(action: str, item_id: str = "", outcome: str = "", reason: str = "") -> dict:
-        """Call the existing repair queue CLI; it owns locks, attempts and completion.
-
-        Args:
-            action: refresh, lock, show, unlock or complete.
-            item_id: ID returned by the queue; required for unlock and complete.
-            outcome: fixed, blocked or skipped; required for complete.
-            reason: Evidence-based reason for unresolved work.
-        """
-        selected_repair_target()
-        return repository.repair_action(action, item_id, outcome, reason)
 
     sources = [read_file, list_files, search_text]
     inspection = [*sources, workflow_diff, execution_evidence]
@@ -379,6 +233,8 @@ complete case, line-numbered final test, optional case plan, and the
 current exact-target JUnit, Allure and ordered HTTP evidence. Use read_file and
 search_text to inspect the helpers called by the test, including their assertions,
 and relevant contract details. Helper source is not bundled in the packet.
+Request independent source reads together in one model response when their paths
+are already known; the host executes those tool requests sequentially.
 These tools expose source and contract text only; execution artifacts are available
 only in the prepared packet.
 Keep execution claims tied to the packet's exact target and run; another report
@@ -394,10 +250,10 @@ unverified is 'none' or a concrete claim whose evidence is missing; question is
 'none' or a material question unresolved by the supplied case and repository.
 Keep a passing execution result distinct from full conformance to the case.
 """,
-            reviewer_tools(),
+            [review_read_file, review_search_text],
             ReviewResult,
-            hooks=[ReviewPacketInput(repository, case)],
-            model_call_limit=12,
+            hooks=[ReviewPacketInput()],
+            model_call_limit=20,
         ),
     }
     if include_readiness:

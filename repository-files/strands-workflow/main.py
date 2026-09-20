@@ -215,13 +215,18 @@ def run_cases(
                     analysis: str = selected_analysis_model,
                     implementation: str = model,
                 ):
-                    selected = analysis if role in ANALYSIS_ROLES else implementation
-                    return make_model(provider, selected)
+                    is_analysis = role in ANALYSIS_ROLES
+                    selected = analysis if is_analysis else implementation
+                    return make_model(
+                        provider,
+                        selected,
+                        effort="medium" if is_analysis else "high",
+                        max_tokens=16384 if is_analysis else 32768,
+                    )
 
                 agents = make_agents(
                     adapter,
                     role_model,
-                    case.text,
                     include_readiness=assessment is None,
                 )
             phase = "workflow"

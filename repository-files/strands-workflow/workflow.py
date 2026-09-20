@@ -6,6 +6,7 @@ import logging
 import traceback
 
 from metrics import stage_metrics
+from safety import ModelCallLimitExceeded
 from state import EVIDENCE_STATUSES, Assessment
 from strands.hooks import (
     AfterMultiAgentInvocationEvent,
@@ -13,6 +14,7 @@ from strands.hooks import (
 )
 from strands.multiagent import GraphBuilder
 from strands.multiagent.base import Status
+from strands.types.exceptions import EventLoopException
 
 logger = logging.getLogger(__name__)
 
@@ -191,7 +193,7 @@ async def _close_model_clients(agents: dict) -> None:
             logger.warning("Could not close a workflow model client", exc_info=True)
 
 
-def build_graph(agents: dict, repository):
+def build_graph(agents: dict):
     """Repair owns its existing run loop and budgets; the graph chooses stages."""
     builder = GraphBuilder()
     # Practice: register review, connect verified results, and check freshness before review.
@@ -219,6 +221,7 @@ def build_graph(agents: dict, repository):
     graph = builder.build()
 
     def after_node(event):
+        repository = event.invocation_state["repository"]
         node = event.source.state.results[event.node_id]
         result = node.result
         if getattr(result, "structured_output", None) is None:
@@ -292,7 +295,7 @@ def run_workflow(
             },
         )
 
-    graph = build_graph(agents, repository)
+    graph = build_graph(agents)
     task = (
         f"Complete the API automation workflow for {repository.case_id}. "
         "The request includes the selected readiness decision, automation of this case "
@@ -308,9 +311,16 @@ def run_workflow(
         )
     error = None
     error_message = None
+    model_call_limit = None
     try:
-        graph(task)
+        graph(task, invocation_state={"repository": repository, "case": case})
     except Exception as failure:
+        cause = failure
+        while isinstance(cause, EventLoopException):
+            cause = cause.original_exception
+        if isinstance(cause, ModelCallLimitExceeded):
+            model_call_limit = cause
+            failure = cause
         error = type(failure).__name__
         error_message = str(failure)
         (repository.output_dir / "error.log").write_text(traceback.format_exc(), encoding="utf-8")
@@ -372,4 +382,17 @@ def run_workflow(
             order[-1] if order else None,
         )
         report["error_log"] = "error.log"
+    if model_call_limit is not None:
+        report.update(
+            error_code="MODEL_CALL_LIMIT",
+            error_stage=model_call_limit.stage,
+            model_call_limit={
+                "calls": model_call_limit.calls,
+                "maximum": model_call_limit.maximum,
+            },
+            next_action=(
+                f"Inspect the {model_call_limit.stage} stage's recorded work and "
+                "model-call budget before retrying the workflow."
+            ),
+        )
     return _write_result(repository, readiness_source, report)

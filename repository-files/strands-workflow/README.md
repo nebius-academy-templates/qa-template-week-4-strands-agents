@@ -53,7 +53,12 @@ Set either `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in the current environment.
 Do not put a key in this repository. Select the matching provider and an
 available model explicitly when running `main.py`. The analysis model handles
 readiness and the later review route. The implementation model identifies and
-automates the assigned test in generation, and handles conditional repair. For Anthropic, both model configurations request `medium` effort.
+automates the assigned test in generation, and handles conditional repair.
+Anthropic generation and repair use effort `high` and `max_tokens=32768`;
+readiness and review use effort `medium` and `max_tokens=16384`. The token limit
+applies to each model response, including thinking tokens when used, rather
+than the entire stage. These Anthropic settings do not change the OpenAI
+configuration.
 
 ## How the application is assembled
 
@@ -62,7 +67,7 @@ The implementation keeps three concerns separate:
 | Concern | Location | Effect |
 |---|---|---|
 | Model instructions | `agents.py` and the installed Markdown procedures | Define what each model call evaluates or produces. |
-| Available operations | Tool functions in `agents.py`, backed by `repository.py` | Bound which files and commands each agent can use. |
+| Available operations | Tool functions in `repository_tools.py`, backed by `repository.py` | Bound which files and commands each agent can use. |
 | Execution dependencies | Edges and conditions in `workflow.py` | Decide which completed result can start another operation. |
 
 `AgentSkills` loads `gen-api-test` and `test-repair` instructions on demand.
@@ -74,7 +79,7 @@ of a successful run. The host application supplies those operations separately.
 | `readiness` | Existing readiness instructions | Read and search repository sources. |
 | `generation` | `gen-api-test` through `AgentSkills` | Check the assigned ID, create or validate the plan before changes, implement the selected case and run its exact method. |
 | `repair` | `test-repair` through `AgentSkills` | Diagnose the selected target, use the existing queue, edit permitted test layers, and rerun that exact target. |
-| `review` | Case-check section of `automate-test-case` | Receive the complete case, final test, optional plan and exact-target evidence; inspect called helpers and contracts with restricted `read_file` and `search_text` tools. It may make at most 12 model calls. |
+| `review` | Case-check section of `automate-test-case` | Receive the complete case, final test, optional plan and exact-target evidence; inspect called helpers and contracts with restricted `read_file` and `search_text` tools. It may make at most 20 model calls, including structured output. |
 
 Every role also receives the complete original case, `AGENTS.md`, and
 `agent_docs/AI_POLICY.md`. Generation implements the assigned case under its
@@ -101,6 +106,8 @@ JUnit and Allure summaries; and ordered HTTP request/response attachments.
 The reviewer reads called helpers, including their assertions, and relevant
 contracts through `read_file` and `search_text`. These tools expose source and
 contract documents; execution artifacts remain available only in the packet.
+The reviewer requests independent source reads together when their paths are
+known; the host still executes those tool requests sequentially.
 Packet construction does not parse Kotlin dependencies. A source change during
 review invalidates the final execution claim.
 
@@ -185,6 +192,13 @@ metrics are not added to the next agent's input. A graph status of `completed`
 means only that graph execution stopped normally.
 The batch report is saved before and after each case. Setup, execution and cleanup
 errors retain the completed cases, remaining order and failure details.
+Exhausting a stage's model-call budget produces `VERIFICATION_INCOMPLETE` with
+`error_type: ModelCallLimitExceeded`, `error_code: MODEL_CALL_LIMIT`, the exact
+`error_stage`, and `model_call_limit` containing `calls` and `maximum`. Inspect
+the recorded stage budget and its work before retrying; this error does not mean
+the model refused to return the structured schema. The final structured-output
+request also counts toward the budget. The original traceback is retained in
+the case's `error.log`.
 
 After the review route is connected, each case directory also receives a
 `review-packet.json` containing the exact redacted model input. The private
