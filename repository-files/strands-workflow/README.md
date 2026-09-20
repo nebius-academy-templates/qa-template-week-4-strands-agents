@@ -60,6 +60,11 @@ applies to each model response, including thinking tokens when used, rather
 than the entire stage. These Anthropic settings do not change the OpenAI
 configuration.
 
+Each case creates one analysis model for readiness/review and one implementation
+model for generation/repair. Agents receive those instances explicitly and keep
+separate conversation state, tools and output schemas. The host closes each
+distinct client once, including clients created before a setup failure.
+
 ## How the application is assembled
 
 The implementation keeps three concerns separate:
@@ -199,6 +204,13 @@ the recorded stage budget and its work before retrying; this error does not mean
 the model refused to return the structured schema. The final structured-output
 request also counts toward the budget. The original traceback is retained in
 the case's `error.log`.
+The limits are 60 model calls for generation, 20 for review, and 120 each for
+readiness and repair. These limits do not replace the repair hook's attempt limit.
+
+An interrupted stage retains the native usage and tool counters recorded before
+the failure in its stage JSON and case report, with `metrics.partial: true`.
+Usage from a provider response that never arrived may be missing; these counters
+are not a complete billing total. Unavailable measurements are `null`.
 
 After the review route is connected, each case directory also receives a
 `review-packet.json` containing the exact redacted model input. The private

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -64,14 +63,8 @@ class ModelSettings:
     max_tokens: int
 
 
-ANALYSIS_ROLES = frozenset({"readiness", "review"})
 ANALYSIS_SETTINGS = ModelSettings(effort="medium", max_tokens=16_384)
 IMPLEMENTATION_SETTINGS = ModelSettings(effort="high", max_tokens=32_768)
-
-
-def role_settings(role: str) -> ModelSettings:
-    """Analysis roles read and judge; implementation roles edit sources and run tests."""
-    return ANALYSIS_SETTINGS if role in ANALYSIS_ROLES else IMPLEMENTATION_SETTINGS
 
 
 def make_model(provider: str, model_id: str, settings: ModelSettings) -> Model:
@@ -114,7 +107,8 @@ def _section(document: str, heading: str) -> str:
 
 def make_agents(
     repository: Repository,
-    model_factory: Callable[[str], Model],
+    analysis_model: Model,
+    implementation_model: Model,
     include_readiness: bool = True,
 ) -> dict[str, Agent]:
     """Bootstrap trusted local policy and give each role its own tool set."""
@@ -149,13 +143,15 @@ The host writes the stage reports from your structured result.
         tools: list,
         schema: type,
         skill: str = "",
+        *,
+        model: Model,
         hooks: list | None = None,
         model_call_limit: int = 120,
     ) -> Agent:
         return Agent(
             name=name,
             agent_id=name,
-            model=model_factory(name),
+            model=model,
             system_prompt=common + "\n" + instructions,
             tools=tools,
             plugins=[skill_plugin(skill)] if skill else [],
@@ -215,6 +211,8 @@ concise plan, changes, result and evidence paths in Implementation.
             [*inspection, write_file, edit_file, run_api_test],
             Implementation,
             "gen-api-test",
+            model=implementation_model,
+            model_call_limit=60,
         ),
         "repair": agent(
             "repair",
@@ -241,6 +239,7 @@ from a stale, skipped, zero-test or failed run. Return the RepairOutcome schema.
             [*inspection, write_file, edit_file, run_repair_test, repair_action],
             RepairOutcome,
             "test-repair",
+            model=implementation_model,
         ),
         "review": agent(
             "review",
@@ -275,6 +274,7 @@ Keep a passing execution result distinct from full conformance to the case.
             ReviewResult,
             hooks=[ReviewPacketInput()],
             model_call_limit=20,
+            model=analysis_model,
         ),
     }
     if include_readiness:
@@ -296,5 +296,6 @@ selected assignment, even if an older readiness procedure requests that comparis
 """,
             sources,
             Assessment,
+            model=analysis_model,
         )
     return agents

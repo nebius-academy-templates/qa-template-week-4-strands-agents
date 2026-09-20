@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
 import traceback
+from collections.abc import Iterable
 
-from metrics import stage_metrics
+from metrics import partial_stage_metrics, stage_metrics
 from safety import ModelCallLimitExceeded
 from state import EVIDENCE_STATUSES, Assessment
 from strands.hooks import (
     AfterMultiAgentInvocationEvent,
     AfterNodeCallEvent,
+    BeforeNodeCallEvent,
 )
+from strands.models import Model
 from strands.multiagent import GraphBuilder
 from strands.multiagent.base import Status
 from strands.types.exceptions import EventLoopException
@@ -174,11 +178,11 @@ def _final_next_action(status: str, target: str = "") -> str:
     return actions.get(status, "Inspect the final stage result before continuing.")
 
 
-async def _close_model_clients(agents: dict) -> None:
-    """Close per-agent async clients before Strands closes its temporary event loop."""
+async def close_model_clients(models: Iterable[Model | None]) -> None:
+    """Close each distinct provider client once."""
     closed: set[int] = set()
-    for agent in agents.values():
-        client = getattr(getattr(agent, "model", None), "client", None)
+    for model in models:
+        client = getattr(model, "client", None)
         if client is None or id(client) in closed:
             continue
         close = getattr(client, "close", None)
@@ -220,6 +224,9 @@ def build_graph(agents: dict):
     builder.set_max_node_executions(4)
     graph = builder.build()
 
+    def before_node(event):
+        event.invocation_state["active_stage"] = event.node_id
+
     def after_node(event):
         repository = event.invocation_state["repository"]
         node = event.source.state.results[event.node_id]
@@ -235,8 +242,9 @@ def build_graph(agents: dict):
         _publish_stage_output(event.node_id, node, output, repository.output_dir)
 
     async def close_clients(_event):
-        await _close_model_clients(agents)
+        await close_model_clients(agent.model for agent in agents.values())
 
+    graph.add_hook(before_node, BeforeNodeCallEvent)
     graph.add_hook(after_node, AfterNodeCallEvent)
     graph.add_hook(close_clients, AfterMultiAgentInvocationEvent)
     return graph
@@ -275,27 +283,32 @@ def run_workflow(
     initial_assessment: Assessment | None = None,
     readiness_source: str = "model",
 ) -> dict:
-    initial_readiness = (
-        _write_initial_readiness(repository, initial_assessment, readiness_source)
-        if initial_assessment is not None
-        else None
-    )
-    if initial_assessment is not None and initial_assessment.status != "READY":
-        return _write_result(
-            repository,
-            readiness_source,
-            {
-                "status": initial_assessment.status,
-                "graph_status": "skipped",
-                "error_type": None,
-                "execution_order": [],
-                "evidence": repository.current_evidence(),
-                "stages": {"readiness": initial_readiness},
-                "next_action": _final_next_action(initial_assessment.status),
-            },
+    graph = None
+    try:
+        initial_readiness = (
+            _write_initial_readiness(repository, initial_assessment, readiness_source)
+            if initial_assessment is not None
+            else None
         )
+        if initial_assessment is not None and initial_assessment.status != "READY":
+            return _write_result(
+                repository,
+                readiness_source,
+                {
+                    "status": initial_assessment.status,
+                    "graph_status": "skipped",
+                    "error_type": None,
+                    "execution_order": [],
+                    "evidence": repository.current_evidence(),
+                    "stages": {"readiness": initial_readiness},
+                    "next_action": _final_next_action(initial_assessment.status),
+                },
+            )
 
-    graph = build_graph(agents)
+        graph = build_graph(agents)
+    finally:
+        if graph is None:
+            asyncio.run(close_model_clients(agent.model for agent in agents.values()))
     task = (
         f"Complete the API automation workflow for {repository.case_id}. "
         "The request includes the selected readiness decision, automation of this case "
@@ -311,9 +324,11 @@ def run_workflow(
         )
     error = None
     error_message = None
+    error_log = None
     model_call_limit = None
+    invocation_state = {"repository": repository, "case": case}
     try:
-        graph(task, invocation_state={"repository": repository, "case": case})
+        graph(task, invocation_state=invocation_state)
     except Exception as failure:
         cause = failure
         while isinstance(cause, EventLoopException):
@@ -323,7 +338,13 @@ def run_workflow(
             failure = cause
         error = type(failure).__name__
         error_message = str(failure)
-        (repository.output_dir / "error.log").write_text(traceback.format_exc(), encoding="utf-8")
+        try:
+            (repository.output_dir / "error.log").write_text(
+                traceback.format_exc(), encoding="utf-8"
+            )
+            error_log = "error.log"
+        except OSError:
+            logger.warning("Could not save the workflow error log", exc_info=True)
     state = graph.state
     stages = {name: stage_report(state, name) for name in state.results}
     if initial_readiness is not None:
@@ -332,6 +353,37 @@ def run_workflow(
             **stages,
         }
     order = [node.node_id for node in state.execution_order]
+    error_stage = None
+    if error:
+        error_stage = (
+            model_call_limit.stage
+            if model_call_limit is not None
+            else next(
+                (name for name, node in state.results.items() if node.status == Status.FAILED),
+                invocation_state.get("active_stage"),
+            )
+        )
+        if error_stage in agents:
+            node = state.results.get(error_stage)
+            stage = {
+                **stages.get(error_stage, {}),
+                "status": "VERIFICATION_INCOMPLETE",
+                "error_type": error,
+                "error_message": error_message,
+                "metrics": partial_stage_metrics(
+                    node,
+                    getattr(agents[error_stage], "event_loop_metrics", None)
+                    if node is not None
+                    else None,
+                ),
+            }
+            stages[error_stage] = stage
+            try:
+                (repository.output_dir / f"{error_stage}.json").write_text(
+                    json.dumps(stage, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+            except OSError:
+                logger.warning("Could not save the failed stage report", exc_info=True)
     final = stages.get(order[-1], {}) if order else {}
     status = final.get("status", "VERIFICATION_INCOMPLETE")
     evidence = repository.current_evidence()
@@ -377,11 +429,9 @@ def run_workflow(
         report["blocking_reason"] = blocking_reason
     if error:
         report["error_message"] = error_message
-        report["error_stage"] = next(
-            (name for name, node in state.results.items() if node.status == Status.FAILED),
-            order[-1] if order else None,
-        )
-        report["error_log"] = "error.log"
+        report["error_stage"] = error_stage
+        if error_log is not None:
+            report["error_log"] = error_log
     if model_call_limit is not None:
         report.update(
             error_code="MODEL_CALL_LIMIT",

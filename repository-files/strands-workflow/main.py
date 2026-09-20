@@ -3,20 +3,19 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import re
 import runpy
-from collections.abc import Callable
 from pathlib import Path
 from uuid import uuid4
 
-from agents import ANALYSIS_ROLES, make_agents, make_model, role_settings
+from agents import ANALYSIS_SETTINGS, IMPLEMENTATION_SETTINGS, make_agents, make_model
 from case_loader import SUPPORTED_SUFFIXES, TEXT_SUFFIXES, CaseInput, read_cases
 from repository import Repository
 from state import Assessment
-from strands.models import Model
 from telemetry import NativeTelemetry
-from workflow import run_workflow
+from workflow import close_model_clients, run_workflow
 from workspace import ensure_safe_path
 
 CASE_OUTCOMES = frozenset(
@@ -51,18 +50,6 @@ def resolve_analysis_model(provider: str, model: str, analysis_model: str | None
     if analysis_model:
         return analysis_model
     return "claude-sonnet-5" if provider == "anthropic" else model
-
-
-def role_model_factory(
-    provider: str, implementation_model: str, analysis_model: str
-) -> Callable[[str], Model]:
-    """Bind each graph role to its tier's model ID and provider settings."""
-
-    def role_model(role: str) -> Model:
-        model_id = analysis_model if role in ANALYSIS_ROLES else implementation_model
-        return make_model(provider, model_id, role_settings(role))
-
-    return role_model
 
 
 def initial_readiness(
@@ -222,11 +209,19 @@ def run_cases(
             )
             agents = {}
             if assessment is None or assessment.status == "READY":
-                agents = make_agents(
-                    adapter,
-                    role_model_factory(provider, model, selected_analysis_model),
-                    include_readiness=assessment is None,
-                )
+                analysis = implementation = None
+                try:
+                    analysis = make_model(provider, selected_analysis_model, ANALYSIS_SETTINGS)
+                    implementation = make_model(provider, model, IMPLEMENTATION_SETTINGS)
+                    agents = make_agents(
+                        adapter,
+                        analysis_model=analysis,
+                        implementation_model=implementation,
+                        include_readiness=assessment is None,
+                    )
+                except BaseException:
+                    asyncio.run(close_model_clients((analysis, implementation)))
+                    raise
             phase = "workflow"
             result = run_workflow(
                 case.text,
