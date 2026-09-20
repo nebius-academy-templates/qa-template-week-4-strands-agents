@@ -2,7 +2,8 @@
 
 This starter coordinates assigned API cases through readiness, generation and
 fresh exact execution, conditional repair, and a final check against each case.
-Cases run in the supplied order with a new graph and repository adapter per case.
+Cases run in the supplied order with separate repository adapters. Cases that
+proceed to model execution also use a new graph.
 It uses the documents, skills, hook, Kotlin suite and workbook already installed
 in the project repository.
 
@@ -60,10 +61,12 @@ applies to each model response, including thinking tokens when used, rather
 than the entire stage. These Anthropic settings do not change the OpenAI
 configuration.
 
-Each case creates one analysis model for readiness/review and one implementation
-model for generation/repair. Agents receive those instances explicitly and keep
-separate conversation state, tools and output schemas. The host closes each
-distinct client once, including clients created before a setup failure.
+Cases that proceed to model execution create one analysis model for
+readiness/review and one implementation model for generation/repair. Reused
+`BLOCKED` or `NEEDS_CLARIFICATION` decisions end the case without creating models.
+Agents receive the model instances explicitly and keep separate conversation
+state, tools and output schemas. The host closes each distinct client once,
+including clients created before a setup failure.
 
 ## How the application is assembled
 
@@ -188,13 +191,14 @@ or an explicitly allowed `ALREADY_IMPLEMENTED`. Other outcomes produce
 `STOPPED` retains the remaining case IDs and the reason continuation was blocked.
 Each case keeps a separate plan at
 `agent_docs/automation-plans/<case-id>.md`, so processing a later case does not
-replace an earlier case's plan. Each stage report contains its domain result plus
-duration, cycle count, model latency, token counts, cache counts when the
+replace an earlier case's plan. Reports from agent invocations contain the domain
+result plus duration, cycle count, model latency, token counts, cache counts when the
 provider reports them, and per-tool name, count, success, error, and total-time
 values. These metrics are selected directly from the Strands result; raw metric
 summaries, messages, tool arguments, and tool results are not serialized. The
 metrics are not added to the next agent's input. A graph status of `completed`
-means only that graph execution stopped normally.
+means only that graph execution stopped normally. Reused workbook and prepared
+preflight readiness decisions have no model metrics because they invoke no model.
 The batch report is saved before and after each case. Setup, execution and cleanup
 errors retain the completed cases, remaining order and failure details.
 Exhausting a stage's model-call budget produces `VERIFICATION_INCOMPLETE` with
@@ -212,9 +216,9 @@ the failure in its stage JSON and case report, with `metrics.partial: true`.
 Usage from a provider response that never arrived may be missing; these counters
 are not a complete billing total. Unavailable measurements are `null`.
 
-After the review route is connected, each case directory also receives a
-`review-packet.json` containing the exact redacted model input. The private
-`_review_packet` message is not copied into stage JSON or the case
+When a case reaches review, successful packet preparation writes
+`review-packet.json` with the initial redacted review input to that case's directory.
+The private `_review_packet` message is not copied into stage JSON or the case
 `result.json`.
 
 The application does not commit, push, update tickets, or change the product.
@@ -222,6 +226,13 @@ It has no checkpoint or restart protocol. After an interrupted process, inspect
 the existing repair state and start a new invocation.
 
 ## Prompt caching and observability
+
+For Anthropic, `tokens.total` is uncached input plus output; `cache_read_input`
+and `cache_write_input` are reported separately. For OpenAI, cached prompt tokens
+are already included in `tokens.input` and `tokens.total`, so do not add them again.
+The pinned Strands 1.55.1 adapters for Anthropic and OpenAI do not measure
+provider latency; `model.latency_ms` is zero. This does not mean an instantaneous
+response. `duration_ms` measures elapsed stage time, including model and tool work.
 
 Anthropic runs enable provider-side ephemeral caching for the stable system
 prompt and tool definitions. The default TTL is five minutes. Set
@@ -256,8 +267,10 @@ the current evidence again and cancel the node when it is missing or stale.
 Do not change agent prompts, repository tools, repair budgets, or evidence
 classification for this task. After the change, verified generation and repair
 results must reach review with the prepared packet, while missing or stale
-evidence must keep review from running. A review finding must produce
-`CHANGES_REQUESTED`.
+evidence must keep review from running. A completed review with findings and no
+unverified claims or unresolved questions produces `CHANGES_REQUESTED`. An
+incomplete comparison, unverified claim or unresolved question produces
+`NEEDS_INVESTIGATION`, even when findings are present.
 
 ## Run
 
