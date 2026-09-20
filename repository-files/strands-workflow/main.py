@@ -3,21 +3,21 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import re
 import runpy
 from pathlib import Path
 from uuid import uuid4
 
-from agents import make_agents, make_model
+from agents import ANALYSIS_SETTINGS, IMPLEMENTATION_SETTINGS, make_agents, make_model
 from case_loader import SUPPORTED_SUFFIXES, TEXT_SUFFIXES, CaseInput, read_cases
 from repository import Repository
 from state import Assessment
 from telemetry import NativeTelemetry
-from workflow import run_workflow
+from workflow import close_model_clients, run_workflow
 from workspace import ensure_safe_path
 
-ANALYSIS_ROLES = frozenset({"readiness", "review"})
 CASE_OUTCOMES = frozenset(
     {
         "REVIEWED",
@@ -137,11 +137,12 @@ def run_cases(
     if skip_implemented:
         accepted.add("ALREADY_IMPLEMENTED")
     stopped = False
+    selected_analysis_model = resolve_analysis_model(provider, model, analysis_model)
     report_path = output_dir / "result.json"
     report = {
         "batch_status": "RUNNING",
         "models": {
-            "analysis": resolve_analysis_model(provider, model, analysis_model),
+            "analysis": selected_analysis_model,
             "implementation": model,
         },
         "readiness_mode": (
@@ -208,21 +209,19 @@ def run_cases(
             )
             agents = {}
             if assessment is None or assessment.status == "READY":
-                selected_analysis_model = resolve_analysis_model(provider, model, analysis_model)
-
-                def role_model(
-                    role: str,
-                    analysis: str = selected_analysis_model,
-                    implementation: str = model,
-                ):
-                    selected = analysis if role in ANALYSIS_ROLES else implementation
-                    return make_model(provider, selected)
-
-                agents = make_agents(
-                    adapter,
-                    role_model,
-                    include_readiness=assessment is None,
-                )
+                analysis = implementation = None
+                try:
+                    analysis = make_model(provider, selected_analysis_model, ANALYSIS_SETTINGS)
+                    implementation = make_model(provider, model, IMPLEMENTATION_SETTINGS)
+                    agents = make_agents(
+                        adapter,
+                        analysis_model=analysis,
+                        implementation_model=implementation,
+                        include_readiness=assessment is None,
+                    )
+                except BaseException:
+                    asyncio.run(close_model_clients((analysis, implementation)))
+                    raise
             phase = "workflow"
             result = run_workflow(
                 case.text,

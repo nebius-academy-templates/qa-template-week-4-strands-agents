@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Literal
 
 from repository import Repository
 from repository_tools import (
@@ -51,7 +52,22 @@ class ReviewPacketInput:
         ]
 
 
-def make_model(provider: str, model_id: str, effort: str = "medium") -> Model:
+Effort = Literal["low", "medium", "high", "xhigh", "max"]
+
+
+@dataclass(frozen=True)
+class ModelSettings:
+    """Anthropic response settings for one role tier; the OpenAI provider ignores them."""
+
+    effort: Effort
+    max_tokens: int
+
+
+ANALYSIS_SETTINGS = ModelSettings(effort="medium", max_tokens=16_384)
+IMPLEMENTATION_SETTINGS = ModelSettings(effort="high", max_tokens=32_768)
+
+
+def make_model(provider: str, model_id: str, settings: ModelSettings) -> Model:
     """Use the selected provider and model with credentials from the environment."""
     if provider not in {"anthropic", "openai"}:
         raise ValueError("Choose anthropic or openai")
@@ -71,8 +87,8 @@ def make_model(provider: str, model_id: str, effort: str = "medium") -> Model:
         return AnthropicModel(
             client_args=client_args,
             model_id=model_id,
-            max_tokens=8192,
-            params={"output_config": {"effort": effort}},
+            max_tokens=settings.max_tokens,
+            params={"output_config": {"effort": settings.effort}},
             cache_config=CacheConfig(
                 ttl=cache_ttl,
                 system_prompt_ttl=True,
@@ -91,7 +107,8 @@ def _section(document: str, heading: str) -> str:
 
 def make_agents(
     repository: Repository,
-    model_factory: Callable[[str], Model],
+    analysis_model: Model,
+    implementation_model: Model,
     include_readiness: bool = True,
 ) -> dict[str, Agent]:
     """Bootstrap trusted local policy and give each role its own tool set."""
@@ -126,13 +143,15 @@ The host writes the stage reports from your structured result.
         tools: list,
         schema: type,
         skill: str = "",
+        *,
+        model: Model,
         hooks: list | None = None,
         model_call_limit: int = 120,
     ) -> Agent:
         return Agent(
             name=name,
             agent_id=name,
-            model=model_factory(name),
+            model=model,
             system_prompt=common + "\n" + instructions,
             tools=tools,
             plugins=[skill_plugin(skill)] if skill else [],
@@ -192,6 +211,8 @@ concise plan, changes, result and evidence paths in Implementation.
             [*inspection, write_file, edit_file, run_api_test],
             Implementation,
             "gen-api-test",
+            model=implementation_model,
+            model_call_limit=60,
         ),
         "repair": agent(
             "repair",
@@ -218,6 +239,7 @@ from a stale, skipped, zero-test or failed run. Return the RepairOutcome schema.
             [*inspection, write_file, edit_file, run_repair_test, repair_action],
             RepairOutcome,
             "test-repair",
+            model=implementation_model,
         ),
         "review": agent(
             "review",
@@ -231,6 +253,8 @@ complete case, line-numbered final test, optional case plan, and the
 current exact-target JUnit, Allure and ordered HTTP evidence. Use read_file and
 search_text to inspect the helpers called by the test, including their assertions,
 and relevant contract details. Helper source is not bundled in the packet.
+Request independent source reads together in one model response when their paths
+are already known; the host executes those tool requests sequentially.
 These tools expose source and contract text only; execution artifacts are available
 only in the prepared packet.
 Keep execution claims tied to the packet's exact target and run; another report
@@ -249,7 +273,8 @@ Keep a passing execution result distinct from full conformance to the case.
             [review_read_file, review_search_text],
             ReviewResult,
             hooks=[ReviewPacketInput()],
-            model_call_limit=12,
+            model_call_limit=20,
+            model=analysis_model,
         ),
     }
     if include_readiness:
@@ -271,5 +296,6 @@ selected assignment, even if an older readiness procedure requests that comparis
 """,
             sources,
             Assessment,
+            model=analysis_model,
         )
     return agents

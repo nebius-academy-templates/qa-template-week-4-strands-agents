@@ -4,18 +4,18 @@ This starter coordinates assigned API cases through readiness, generation and
 fresh exact execution, conditional repair, and a final check against each case.
 Cases run in the supplied order with a new graph and repository adapter per case.
 It uses the documents, skills, hook, Kotlin suite and workbook already installed
-in the practice repository.
+in the project repository.
 
 The starter supplies four roles. Its graph connects readiness, generation and
 conditional repair. The review agent is deliberately not registered as a graph
-node until the review-route practice is completed. Until then, a passing test
-ends as `VERIFIED` with review still pending. The batch may continue to later
+node. Until the review route is connected, a passing test ends as `VERIFIED`
+with review still pending. The batch may continue to later
 cases, but those results remain unresolved until reviewed.
 
 ## Prerequisites
 
 Use Python 3.11 or newer. Before running the application, verify that the
-practice repository contains:
+project repository contains:
 
 - `AGENTS.md` and `agent_docs/AI_POLICY.md`;
 - `agent_docs/task-automation-readiness-instructions.md`;
@@ -53,7 +53,17 @@ Set either `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in the current environment.
 Do not put a key in this repository. Select the matching provider and an
 available model explicitly when running `main.py`. The analysis model handles
 readiness and the later review route. The implementation model identifies and
-automates the assigned test in generation, and handles conditional repair. For Anthropic, both model configurations request `medium` effort.
+automates the assigned test in generation, and handles conditional repair.
+Anthropic generation and repair use effort `high` and `max_tokens=32768`;
+readiness and review use effort `medium` and `max_tokens=16384`. The token limit
+applies to each model response, including thinking tokens when used, rather
+than the entire stage. These Anthropic settings do not change the OpenAI
+configuration.
+
+Each case creates one analysis model for readiness/review and one implementation
+model for generation/repair. Agents receive those instances explicitly and keep
+separate conversation state, tools and output schemas. The host closes each
+distinct client once, including clients created before a setup failure.
 
 ## How the application is assembled
 
@@ -74,7 +84,7 @@ of a successful run. The host application supplies those operations separately.
 | `readiness` | Existing readiness instructions | Read and search repository sources. |
 | `generation` | `gen-api-test` through `AgentSkills` | Check the assigned ID, create or validate the plan before changes, implement the selected case and run its exact method. |
 | `repair` | `test-repair` through `AgentSkills` | Diagnose the selected target, use the existing queue, edit permitted test layers, and rerun that exact target. |
-| `review` | Case-check section of `automate-test-case` | Receive the complete case, final test, optional plan and exact-target evidence; inspect called helpers and contracts with restricted `read_file` and `search_text` tools. It may make at most 12 model calls. |
+| `review` | Case-check section of `automate-test-case` | Receive the complete case, final test, optional plan and exact-target evidence; inspect called helpers and contracts with restricted `read_file` and `search_text` tools. It may make at most 20 model calls, including structured output. |
 
 Every role also receives the complete original case, `AGENTS.md`, and
 `agent_docs/AI_POLICY.md`. Generation implements the assigned case under its
@@ -101,6 +111,8 @@ JUnit and Allure summaries; and ordered HTTP request/response attachments.
 The reviewer reads called helpers, including their assertions, and relevant
 contracts through `read_file` and `search_text`. These tools expose source and
 contract documents; execution artifacts remain available only in the packet.
+The reviewer requests independent source reads together when their paths are
+known; the host still executes those tool requests sequentially.
 Packet construction does not parse Kotlin dependencies. A source change during
 review invalidates the final execution claim.
 
@@ -123,7 +135,7 @@ For workbook input, the host reuses only exact readiness values from
 readiness results. The default mode calls the readiness model only when no
 reusable status exists. Pass `--reassess-readiness` to request a new assessment
 even when the workbook has a status. For a curated batch whose cases have
-already been prepared in the course workbook, pass `--prepared-cases`. This mode
+already been prepared in the workbook, pass `--prepared-cases`. This mode
 accepts XLSX input only. Statusless cases then use deterministic workbook shape
 checks plus non-empty values in the required selected-case fields, and continue
 to generation without a separate readiness model call. Ordinary workbook loading
@@ -185,6 +197,20 @@ metrics are not added to the next agent's input. A graph status of `completed`
 means only that graph execution stopped normally.
 The batch report is saved before and after each case. Setup, execution and cleanup
 errors retain the completed cases, remaining order and failure details.
+Exhausting a stage's model-call budget produces `VERIFICATION_INCOMPLETE` with
+`error_type: ModelCallLimitExceeded`, `error_code: MODEL_CALL_LIMIT`, the exact
+`error_stage`, and `model_call_limit` containing `calls` and `maximum`. Inspect
+the recorded stage budget and its work before retrying; this error does not mean
+the model refused to return the structured schema. The final structured-output
+request also counts toward the budget. The original traceback is retained in
+the case's `error.log`.
+The limits are 60 model calls for generation, 20 for review, and 120 each for
+readiness and repair. These limits do not replace the repair hook's attempt limit.
+
+An interrupted stage retains the native usage and tool counters recorded before
+the failure in its stage JSON and case report, with `metrics.partial: true`.
+Usage from a provider response that never arrived may be missing; these counters
+are not a complete billing total. Unavailable measurements are `null`.
 
 After the review route is connected, each case directory also receives a
 `review-packet.json` containing the exact redacted model input. The private
@@ -199,7 +225,7 @@ the existing repair state and start a new invocation.
 
 Anthropic runs enable provider-side ephemeral caching for the stable system
 prompt and tool definitions. The default TTL is five minutes. Set
-`ANTHROPIC_CACHE_TTL=1h` when a longer exercise window is appropriate. A cache
+`ANTHROPIC_CACHE_TTL=1h` when a longer cache lifetime is appropriate. A cache
 hit reduces repeated prompt processing; it does not preserve workflow state or
 prove a test result.
 
@@ -222,7 +248,7 @@ application validates this setting and does not rewrite the process
 environment. The model-call limit remains active independently of whether
 native tracing is enabled.
 
-## Practice: Add the Review Route
+## Review configuration
 
 Connect the supplied `review` agent in `workflow.py`. A verified generation or
 verified repair may proceed to review. Immediately before review starts, read
@@ -233,7 +259,7 @@ results must reach review with the prepared packet, while missing or stale
 evidence must keep review from running. A review finding must produce
 `CHANGES_REQUESTED`.
 
-## Capstone: Run an Evidence-Backed Workflow
+## Run
 
 Use the completed graph with one or more assigned complete API cases. Start the
 backend, set the provider key, and run from `strands-workflow/`. Supply case IDs
@@ -255,12 +281,11 @@ worksheets with their standard columns: `Case ID`, `Title`, `Description`,
   --prepared-cases
 ```
 
-Use `--reassess-readiness` for the full teaching readiness flow. Without either
-readiness flag, cases without a stored status run model readiness and cases with
-a status reuse it. For Anthropic, omitting `--analysis-model` still uses
-`claude-sonnet-5` for readiness and review. For OpenAI, it keeps the
-older single-model behavior by using `--model` for every role unless an analysis
-model is supplied.
+The readiness options are described under
+[How the application is assembled](#how-the-application-is-assembled).
+For Anthropic, omitting `--analysis-model` uses `claude-sonnet-5` for readiness
+and review. For OpenAI, `--model` is used for every role unless
+`--analysis-model` is supplied.
 
 On macOS or Linux, use `./.venv/bin/python`, forward slashes, and shell line
 continuations. Inspect the batch `result.json`, each per-case result and stage

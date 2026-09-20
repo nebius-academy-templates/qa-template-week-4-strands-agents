@@ -5,6 +5,19 @@ from __future__ import annotations
 from strands.hooks import BeforeInvocationEvent, BeforeModelCallEvent, HookRegistry
 
 
+class ModelCallLimitExceeded(RuntimeError):
+    """Identify a host budget stop without blaming the model's structured output."""
+
+    def __init__(self, stage: str, calls: int, maximum: int) -> None:
+        self.stage = stage
+        self.calls = calls
+        self.maximum = maximum
+        super().__init__(
+            f"Model-call limit reached for {stage} ({calls}/{maximum} calls); "
+            "the stage did not complete."
+        )
+
+
 class ModelCallLimit:
     """Stop one agent invocation before it exceeds its model-call budget."""
 
@@ -21,6 +34,5 @@ class ModelCallLimit:
 
     def before_model(self, event: BeforeModelCallEvent) -> None:
         if self.calls >= self.maximum:
-            event.cancel = "Stage model-call limit reached; no execution result was inferred."
-            return
+            raise ModelCallLimitExceeded(event.agent.name, self.calls, self.maximum)
         self.calls += 1
