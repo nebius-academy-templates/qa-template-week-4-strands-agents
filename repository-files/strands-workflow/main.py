@@ -6,18 +6,19 @@ import argparse
 import json
 import re
 import runpy
+from collections.abc import Callable
 from pathlib import Path
 from uuid import uuid4
 
-from agents import make_agents, make_model
+from agents import ANALYSIS_ROLES, make_agents, make_model, role_settings
 from case_loader import SUPPORTED_SUFFIXES, TEXT_SUFFIXES, CaseInput, read_cases
 from repository import Repository
 from state import Assessment
+from strands.models import Model
 from telemetry import NativeTelemetry
 from workflow import run_workflow
 from workspace import ensure_safe_path
 
-ANALYSIS_ROLES = frozenset({"readiness", "review"})
 CASE_OUTCOMES = frozenset(
     {
         "REVIEWED",
@@ -50,6 +51,18 @@ def resolve_analysis_model(provider: str, model: str, analysis_model: str | None
     if analysis_model:
         return analysis_model
     return "claude-sonnet-5" if provider == "anthropic" else model
+
+
+def role_model_factory(
+    provider: str, implementation_model: str, analysis_model: str
+) -> Callable[[str], Model]:
+    """Bind each graph role to its tier's model ID and provider settings."""
+
+    def role_model(role: str) -> Model:
+        model_id = analysis_model if role in ANALYSIS_ROLES else implementation_model
+        return make_model(provider, model_id, role_settings(role))
+
+    return role_model
 
 
 def initial_readiness(
@@ -137,11 +150,12 @@ def run_cases(
     if skip_implemented:
         accepted.add("ALREADY_IMPLEMENTED")
     stopped = False
+    selected_analysis_model = resolve_analysis_model(provider, model, analysis_model)
     report_path = output_dir / "result.json"
     report = {
         "batch_status": "RUNNING",
         "models": {
-            "analysis": resolve_analysis_model(provider, model, analysis_model),
+            "analysis": selected_analysis_model,
             "implementation": model,
         },
         "readiness_mode": (
@@ -208,25 +222,9 @@ def run_cases(
             )
             agents = {}
             if assessment is None or assessment.status == "READY":
-                selected_analysis_model = resolve_analysis_model(provider, model, analysis_model)
-
-                def role_model(
-                    role: str,
-                    analysis: str = selected_analysis_model,
-                    implementation: str = model,
-                ):
-                    is_analysis = role in ANALYSIS_ROLES
-                    selected = analysis if is_analysis else implementation
-                    return make_model(
-                        provider,
-                        selected,
-                        effort="medium" if is_analysis else "high",
-                        max_tokens=16384 if is_analysis else 32768,
-                    )
-
                 agents = make_agents(
                     adapter,
-                    role_model,
+                    role_model_factory(provider, model, selected_analysis_model),
                     include_readiness=assessment is None,
                 )
             phase = "workflow"

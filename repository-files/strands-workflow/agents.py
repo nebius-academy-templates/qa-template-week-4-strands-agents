@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Literal
 
 from repository import Repository
 from repository_tools import (
@@ -51,9 +53,28 @@ class ReviewPacketInput:
         ]
 
 
-def make_model(
-    provider: str, model_id: str, effort: str = "medium", *, max_tokens: int = 16384
-) -> Model:
+Effort = Literal["low", "medium", "high", "xhigh", "max"]
+
+
+@dataclass(frozen=True)
+class ModelSettings:
+    """Anthropic response settings for one role tier; the OpenAI provider ignores them."""
+
+    effort: Effort
+    max_tokens: int
+
+
+ANALYSIS_ROLES = frozenset({"readiness", "review"})
+ANALYSIS_SETTINGS = ModelSettings(effort="medium", max_tokens=16_384)
+IMPLEMENTATION_SETTINGS = ModelSettings(effort="high", max_tokens=32_768)
+
+
+def role_settings(role: str) -> ModelSettings:
+    """Analysis roles read and judge; implementation roles edit sources and run tests."""
+    return ANALYSIS_SETTINGS if role in ANALYSIS_ROLES else IMPLEMENTATION_SETTINGS
+
+
+def make_model(provider: str, model_id: str, settings: ModelSettings) -> Model:
     """Use the selected provider and model with credentials from the environment."""
     if provider not in {"anthropic", "openai"}:
         raise ValueError("Choose anthropic or openai")
@@ -73,8 +94,8 @@ def make_model(
         return AnthropicModel(
             client_args=client_args,
             model_id=model_id,
-            max_tokens=max_tokens,
-            params={"output_config": {"effort": effort}},
+            max_tokens=settings.max_tokens,
+            params={"output_config": {"effort": settings.effort}},
             cache_config=CacheConfig(
                 ttl=cache_ttl,
                 system_prompt_ttl=True,
