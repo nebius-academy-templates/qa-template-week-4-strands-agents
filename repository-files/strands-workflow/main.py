@@ -7,6 +7,7 @@ import asyncio
 import json
 import re
 import runpy
+import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -186,6 +187,7 @@ def run_cases(
         save_report()
 
     save_report()
+    print(f"Batch report: {report_path}", file=sys.stderr, flush=True)
     telemetry = None
     phase = "telemetry_setup"
     try:
