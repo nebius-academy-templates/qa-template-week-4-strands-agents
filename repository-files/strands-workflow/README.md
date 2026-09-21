@@ -2,6 +2,7 @@
 
 This starter coordinates assigned API cases through readiness, generation and
 fresh exact execution, conditional repair, and a final check against each case.
+Claude through Anthropic is the only implemented model provider.
 Cases run in the supplied order with separate repository adapters. Cases that
 proceed to model execution also use a new graph.
 It uses the documents, skills, hook, Kotlin suite and workbook already installed
@@ -50,16 +51,18 @@ python3 -m venv .venv
 ./.venv/bin/python -m pip install -r requirements.txt
 ```
 
-Set either `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in the current environment.
-Do not put a key in this repository. Select the matching provider and an
-available model explicitly when running `main.py`. The analysis model handles
+Set `ANTHROPIC_API_KEY` in the current environment to use Claude through Anthropic.
+Do not put a key in this repository. The CLI defaults to Anthropic with
+`claude-opus-5` for generation and repair and `claude-sonnet-5` for readiness
+and review. `--provider openai` is an unimplemented placeholder: selecting it
+produces a CLI error before the workflow reads paths or credentials.
+The analysis model handles
 readiness and the later review route. The implementation model identifies and
 automates the assigned test in generation, and handles conditional repair.
 Anthropic generation and repair use effort `high` and `max_tokens=32768`;
 readiness and review use effort `medium` and `max_tokens=16384`. The token limit
 applies to each model response, including thinking tokens when used, rather
-than the entire stage. These Anthropic settings do not change the OpenAI
-configuration.
+than the entire stage.
 
 Cases that proceed to model execution create one analysis model for
 readiness/review and one implementation model for generation/repair. Reused
@@ -228,9 +231,8 @@ the existing repair state and start a new invocation.
 ## Prompt caching and observability
 
 For Anthropic, `tokens.total` is uncached input plus output; `cache_read_input`
-and `cache_write_input` are reported separately. For OpenAI, cached prompt tokens
-are already included in `tokens.input` and `tokens.total`, so do not add them again.
-The pinned Strands 1.55.1 adapters for Anthropic and OpenAI do not measure
+and `cache_write_input` are reported separately.
+The pinned Strands 1.55.1 Anthropic adapter does not measure
 provider latency; `model.latency_ms` is zero. This does not mean an instantaneous
 response. `duration_ms` measures elapsed stage time, including model and tool work.
 
@@ -275,9 +277,9 @@ incomplete comparison, unverified claim or unresolved question produces
 ## Run
 
 Use the completed graph with one or more assigned complete API cases. Start the
-backend, set the provider key, and run from `strands-workflow/`. Supply case IDs
+backend, set `ANTHROPIC_API_KEY`, and run from `strands-workflow/`. Supply case IDs
 in their required execution order. This example uses two workbook cases;
-replace the IDs and model with the assigned values. A `.md` or `.txt` case file
+replace the IDs with the assigned values. A `.md` or `.txt` case file
 can be used only when one case ID is supplied, and its content must explicitly
 include that ID. The workbook must contain the `Case Summary` and `Steps`
 worksheets with their standard columns: `Case ID`, `Title`, `Description`,
@@ -288,17 +290,16 @@ worksheets with their standard columns: `Case ID`, `Title`, `Description`,
   --repo .. `
   --case-file ..\test-cases\test-cases.xlsx `
   --case-id FIRST_CASE_ID SECOND_CASE_ID `
-  --provider anthropic `
-  --model claude-opus-5 `
-  --analysis-model claude-sonnet-5 `
   --prepared-cases
 ```
 
 The readiness options are described under
 [How the application is assembled](#how-the-application-is-assembled).
-For Anthropic, omitting `--analysis-model` uses `claude-sonnet-5` for readiness
-and review. For OpenAI, `--model` is used for every role unless
-`--analysis-model` is supplied.
+Use `--model` and `--analysis-model` to override the Claude model defaults.
+`--model` changes generation and repair; readiness and review
+continue to use `claude-sonnet-5` unless `--analysis-model` is supplied.
+`--provider anthropic` may be supplied explicitly. The `openai` choice remains
+a placeholder and is rejected even when an explicit `--model` is supplied.
 
 On macOS or Linux, use `./.venv/bin/python`, forward slashes, and shell line
 continuations. Inspect the batch `result.json`, each per-case result and stage

@@ -273,14 +273,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--case-file", type=Path, required=True)
     parser.add_argument("--case-id", nargs="+", required=True, metavar="API-NNNN")
-    parser.add_argument("--provider", choices=("anthropic", "openai"), required=True)
-    parser.add_argument("--model", required=True, help="Generation and repair model")
+    parser.add_argument(
+        "--provider",
+        choices=("anthropic", "openai"),
+        default="anthropic",
+        help="Model provider (default: anthropic/Claude; openai is not implemented)",
+    )
+    parser.add_argument(
+        "--model",
+        help="Generation and repair model; defaults to claude-opus-5",
+    )
     parser.add_argument(
         "--analysis-model",
-        help=(
-            "Readiness and review model; defaults to claude-sonnet-5 for "
-            "Anthropic and --model for OpenAI"
-        ),
+        help="Readiness and review model; defaults to claude-sonnet-5",
     )
     readiness = parser.add_mutually_exclusive_group()
     readiness.add_argument(
@@ -302,6 +307,10 @@ def main(argv: list[str] | None = None) -> int:
         "--otel", action="store_true", help="Export traces using OTEL_* environment settings"
     )
     args = parser.parse_args(argv)
+    if args.provider == "openai":
+        parser.error("OpenAI provider is not implemented; use --provider anthropic (Claude)")
+    if args.model is None:
+        args.model = "claude-opus-5"
 
     repository = args.repo.resolve(strict=True)
     case_path = args.case_file.resolve(strict=True)

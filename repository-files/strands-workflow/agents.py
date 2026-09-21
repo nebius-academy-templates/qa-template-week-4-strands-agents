@@ -28,7 +28,6 @@ from strands import Agent, AgentSkills, Skill
 from strands.hooks import BeforeInvocationEvent, HookRegistry
 from strands.models import CacheConfig, Model
 from strands.models.anthropic import AnthropicModel
-from strands.models.openai import OpenAIModel
 from strands.tools.executors import SequentialToolExecutor
 
 
@@ -57,7 +56,7 @@ Effort = Literal["low", "medium", "high", "xhigh", "max"]
 
 @dataclass(frozen=True)
 class ModelSettings:
-    """Anthropic response settings for one role tier; the OpenAI provider ignores them."""
+    """Anthropic response settings for one role tier."""
 
     effort: Effort
     max_tokens: int
@@ -68,34 +67,35 @@ IMPLEMENTATION_SETTINGS = ModelSettings(effort="high", max_tokens=32_768)
 
 
 def make_model(provider: str, model_id: str, settings: ModelSettings) -> Model:
-    """Use the selected provider and model with credentials from the environment."""
-    if provider not in {"anthropic", "openai"}:
-        raise ValueError("Choose anthropic or openai")
+    """Create a Claude model through Anthropic; OpenAI is an unimplemented placeholder."""
+    if provider == "openai":
+        raise NotImplementedError(
+            "OpenAI provider is not implemented; use --provider anthropic (Claude)"
+        )
+    if provider != "anthropic":
+        raise ValueError("Choose anthropic (Claude)")
     if not model_id.strip():
         raise ValueError("An explicit model ID is required")
-    prefix = provider.upper()
-    key = os.getenv(f"{prefix}_API_KEY")
+    key = os.getenv("ANTHROPIC_API_KEY")
     if not key:
-        raise ValueError(f"Set {prefix}_API_KEY in the environment")
+        raise ValueError("Set ANTHROPIC_API_KEY in the environment")
     client_args = {"api_key": key}
-    if base_url := os.getenv(f"{prefix}_BASE_URL"):
+    if base_url := os.getenv("ANTHROPIC_BASE_URL"):
         client_args["base_url"] = base_url
-    if provider == "anthropic":
-        cache_ttl = os.getenv("ANTHROPIC_CACHE_TTL", "5m")
-        if cache_ttl not in {"5m", "1h"}:
-            raise ValueError("ANTHROPIC_CACHE_TTL must be 5m or 1h")
-        return AnthropicModel(
-            client_args=client_args,
-            model_id=model_id,
-            max_tokens=settings.max_tokens,
-            params={"output_config": {"effort": settings.effort}},
-            cache_config=CacheConfig(
-                ttl=cache_ttl,
-                system_prompt_ttl=True,
-                tools_ttl=True,
-            ),
-        )
-    return OpenAIModel(client_args=client_args, model_id=model_id)
+    cache_ttl = os.getenv("ANTHROPIC_CACHE_TTL", "5m")
+    if cache_ttl not in {"5m", "1h"}:
+        raise ValueError("ANTHROPIC_CACHE_TTL must be 5m or 1h")
+    return AnthropicModel(
+        client_args=client_args,
+        model_id=model_id,
+        max_tokens=settings.max_tokens,
+        params={"output_config": {"effort": settings.effort}},
+        cache_config=CacheConfig(
+            ttl=cache_ttl,
+            system_prompt_ttl=True,
+            tools_ttl=True,
+        ),
+    )
 
 
 def _section(document: str, heading: str) -> str:
