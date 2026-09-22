@@ -107,13 +107,13 @@ def review_search_text(pattern: str, path: str = ".", *, tool_context: ToolConte
 
 @tool(context=True)
 def write_file(path: str, content: str, *, tool_context: ToolContext) -> dict:
-    """Write an allowed API test-layer file or this case's automation plan as UTF-8."""
+    """Write an allowed test-layer file or this case's automation plan as UTF-8."""
     return tool_context.invocation_state["repository"].write_file(path, content)
 
 
 @tool(context=True)
 def edit_file(path: str, old_text: str, new_text: str, *, tool_context: ToolContext) -> dict:
-    """Replace one exact text occurrence in an allowed API test-layer or plan file."""
+    """Replace one exact text occurrence in an allowed test-layer or plan file."""
     return tool_context.invocation_state["repository"].edit_file(path, old_text, new_text)
 
 
@@ -139,6 +139,16 @@ def run_api_test(target: str, *, tool_context: ToolContext) -> dict:
     return tool_context.invocation_state["repository"].run_api_test(target)
 
 
+@tool(context=True)
+def run_mobile_test(target: str, *, tool_context: ToolContext) -> dict:
+    """Run the selected Appium method through the installed OS suite runner and verify it.
+
+    Args:
+        target: Fully qualified package.Class.method belonging to the supplied mobile case.
+    """
+    return tool_context.invocation_state["repository"].run_mobile_test(target)
+
+
 def _selected_repair_target(tool_context: ToolContext) -> str:
     state = tool_context.invocation_state
     if not state.get("repair_target"):
@@ -150,7 +160,7 @@ def _selected_repair_target(tool_context: ToolContext) -> str:
 
 @tool(context=True)
 def run_repair_test(target: str, *, tool_context: ToolContext) -> dict:
-    """Format the API module and run the original target through its PRE/POST guard.
+    """Run the original test target through its existing runner and PRE/POST guard.
 
     Args:
         target: The same fully qualified package.Class.method as the preceding failed run.
@@ -158,6 +168,8 @@ def run_repair_test(target: str, *, tool_context: ToolContext) -> dict:
     if target != _selected_repair_target(tool_context):
         raise ValueError("Repair may run only the original workflow target")
     repository = tool_context.invocation_state["repository"]
+    if getattr(repository, "layer", "api") == "mobile":
+        return repository.run_mobile_test(target, repair=True)
     return repository.run_api_test(target)
 
 

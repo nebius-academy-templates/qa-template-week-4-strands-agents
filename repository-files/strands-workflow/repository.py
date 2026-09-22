@@ -1,10 +1,12 @@
-"""Repository tools and fresh API execution evidence for the QA workflow."""
+"""Repository tools and fresh API/mobile execution evidence for the QA workflow."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -17,7 +19,7 @@ from pathlib import Path
 from evidence import ExecutionEvidence
 from kotlin_source import mask_kotlin
 from process_runner import ProcessCleanupError, run_process
-from review_packet import build_review_packet, encode_review_packet, evidence_manifest_from_packet
+from review_packet import build_review_input, encode_review_packet, evidence_manifest_from_packet
 from workspace import RepositoryWorkspace
 
 TEST_RESULT_DIRECTORIES = {
@@ -35,7 +37,7 @@ def validate_test_target(target: str) -> str:
 
 
 class Repository(RepositoryWorkspace):
-    """Run one guarded API test and bind its evidence to the current workspace."""
+    """Run one guarded API or mobile test and bind its evidence to the current workspace."""
 
     def __init__(
         self,
@@ -53,7 +55,10 @@ class Repository(RepositoryWorkspace):
 
     def current_evidence(self) -> dict:
         if self.last_run is None:
-            return {"status": "VERIFICATION_INCOMPLETE", "reason": "No API execution has completed"}
+            return {
+                "status": "VERIFICATION_INCOMPLETE",
+                "reason": "No test execution has completed",
+            }
         if self.last_run.get("source_digest") != self.source_fingerprint():
             return {
                 **deepcopy(self.last_run),
@@ -61,9 +66,29 @@ class Repository(RepositoryWorkspace):
                 "target_status": "VERIFICATION_INCOMPLETE",
                 "reason": "Repository sources changed after execution",
             }
+        mobile = self.last_run.get("mobile")
+        if mobile and mobile.get("apk_sha256"):
+            apk = self.path_for(mobile["apk"])
+            if (
+                not apk.is_file()
+                or hashlib.sha256(apk.read_bytes()).hexdigest() != mobile["apk_sha256"]
+            ):
+                return {
+                    **deepcopy(self.last_run),
+                    "status": "VERIFICATION_INCOMPLETE",
+                    "target_status": "VERIFICATION_INCOMPLETE",
+                    "reason": "Mobile APK changed after execution",
+                }
         return deepcopy(self.last_run)
 
-    def _run(self, command: list[str], log: Path, input_text=None, timeout=900):
+    @property
+    def result_directories(self) -> dict[str, str]:
+        return {
+            area: path.replace("api-tests/", self.test_module + "/", 1)
+            for area, path in TEST_RESULT_DIRECTORIES.items()
+        }
+
+    def _run(self, command: list[str], log: Path, input_text=None, timeout=900, env=None):
         # Windows resolves the executable before applying the child's cwd.
         # Resolve repository-local wrappers without changing the recorded command.
         executable = Path(command[0])
@@ -75,6 +100,7 @@ class Repository(RepositoryWorkspace):
                 cwd=self.root,
                 input=input_text,
                 timeout=timeout,
+                **({"env": env} if env is not None else {}),
             )
         except (OSError, subprocess.TimeoutExpired) as error:
             output = getattr(error, "stdout", "") or ""
@@ -160,7 +186,7 @@ class Repository(RepositoryWorkspace):
     def _inventory(self) -> list[dict]:
         """Read course test metadata; unrelated helper files are not test classes."""
         inventory = []
-        for file in sorted((self.root / "api-tests/src/test/kotlin/tests").rglob("*.kt")):
+        for file in sorted((self.root / self.test_source_root / "tests").rglob("*.kt")):
             text = self.ensure_safe(file).read_text(encoding="utf-8-sig")
             code = mask_kotlin(text)
             if not re.search(r"(?m)^\s*@(?:org\.junit\.jupiter\.api\.)?Test\b", code):
@@ -206,14 +232,17 @@ class Repository(RepositoryWorkspace):
         inventory = self._inventory()
         matching = [item for item in inventory if item["target"] == target]
         if len(matching) != 1:
-            raise ValueError("target must identify exactly one existing API test")
+            raise ValueError("target must identify exactly one existing test in the selected suite")
 
         selected = matching[0]
-        expected_allure_id = self.case_id.removeprefix("API-")
+        expected_allure_id = self.case_id.split("-", 1)[1]
         if selected["allure_id"] != expected_allure_id:
             raise ValueError(f"target must use Allure ID {expected_allure_id!r} for {self.case_id}")
         if sum(item["allure_id"] == expected_allure_id for item in inventory) != 1:
-            raise ValueError(f"Allure ID {expected_allure_id!r} must identify exactly one API test")
+            label = "API" if self.layer == "api" else "mobile"
+            raise ValueError(
+                f"Allure ID {expected_allure_id!r} must identify exactly one {label} test"
+            )
         return selected
 
     def existing_implementation(self, target: str) -> dict:
@@ -251,8 +280,8 @@ class Repository(RepositoryWorkspace):
                 raise ValueError("Current evidence artifact paths do not match its run archive")
         return folder
 
-    def prepare_review_packet(self, case: str, target: str) -> dict:
-        """Build and persist a bounded, redacted packet for the read-only review agent."""
+    def prepare_review_input(self, case: str, target: str) -> tuple[dict, list[dict]]:
+        """Prepare verified JSON and images together; persist only the redacted JSON."""
         if not isinstance(case, str) or not case.strip():
             raise ValueError("Review requires the complete selected case")
         validate_test_target(target)
@@ -277,22 +306,25 @@ class Repository(RepositoryWorkspace):
         if not isinstance(manifest, dict):
             raise ValueError("Exact execution evidence changed after its verified run")
 
-        packet = build_review_packet(
+        packet, image_blocks = build_review_input(
             self, case, target, evidence, selected_test, artifacts, junit_status
         )
         if manifest != evidence_manifest_from_packet(packet):
             raise ValueError("Exact execution evidence changed after its verified run")
 
-        # One final check rejects archive, source or run changes during assembly.
+        # Packet metadata and native images already share the verified bytes.
+        # One final check rejects source, APK or archive changes during assembly.
         refreshed = self.evidence_archive.select(folder, selected_test)
         if manifest != self.evidence_archive.manifest(refreshed, target):
-            raise ValueError("Exact execution evidence changed while assembling the review packet")
+            raise ValueError("Exact execution evidence changed while assembling the review input")
         if self.current_evidence() != evidence:
-            raise ValueError("Repository sources or run changed while assembling the review packet")
+            raise ValueError(
+                "Repository sources, APK or run changed while assembling the review input"
+            )
 
         encoded = encode_review_packet(packet)
         (self.output_dir / "review-packet.json").write_bytes(encoded + b"\n")
-        return packet
+        return packet, image_blocks
 
     def _format_api_tests(self, wrapper: str, folder: Path, selected_path: str):
         """Capture module formatting in the review diff and restore out-of-scope edits."""
@@ -300,13 +332,15 @@ class Repository(RepositoryWorkspace):
         def sources():
             return {
                 file.relative_to(self.root).as_posix(): file.read_bytes()
-                for file in self.files("api-tests")
+                for file in self.files(self.test_module)
                 if file.suffix in {".kt", ".kts"}
             }
 
         before = sources()
         permitted = self.changed_files | {selected_path}
-        run = self._run([wrapper, "--no-daemon", ":api-tests:ktlintFormat"], folder / "format.log")
+        run = self._run(
+            [wrapper, "--no-daemon", f":{self.test_module}:ktlintFormat"], folder / "format.log"
+        )
         after = sources()
         changed = sorted(
             name for name in before.keys() | after.keys() if before.get(name) != after.get(name)
@@ -352,7 +386,7 @@ class Repository(RepositoryWorkspace):
                 if isinstance(report, dict) and report.get("fullName") == target:
                     fresh_target = True
 
-        for area, relative in TEST_RESULT_DIRECTORIES.items():
+        for area, relative in self.result_directories.items():
             previous = folder / "previous" / area
             destination = self.path_for(relative)
             for file in sorted(previous.rglob("*")):
@@ -370,20 +404,65 @@ class Repository(RepositoryWorkspace):
                     shutil.copy2(file, restored)
 
     def run_api_test(self, target: str, *, format_sources: bool = True) -> dict:
+        if self.layer != "api":
+            raise ValueError("run_api_test requires an API case")
+        return self._run_test(target, format_sources=format_sources)
+
+    def run_mobile_test(
+        self, target: str, *, format_sources: bool = True, repair: bool = False
+    ) -> dict:
+        """Use the OS runner for generation and its exact Gradle command for repair."""
+        if self.layer != "mobile":
+            raise ValueError("run_mobile_test requires a mobile case")
+        return self._run_test(target, format_sources=format_sources, repair=repair)
+
+    def _mobile_context(self, folder: Path, repair: bool) -> dict:
+        sdk = os.getenv("ANDROID_HOME") or os.getenv("ANDROID_SDK_ROOT")
+        if not sdk and os.name == "nt":
+            sdk = str(Path(os.environ["LOCALAPPDATA"]) / "Android" / "Sdk")
+        if not sdk:
+            raise ValueError("Set ANDROID_HOME to the SDK used by the mobile runner")
+        adb = Path(sdk) / "platform-tools" / ("adb.exe" if os.name == "nt" else "adb")
+        result = self._run([str(adb), "devices"], folder / "devices.log", timeout=20)
+        devices = re.findall(r"(?m)^([^\s]+)\s+device\s*$", result.stdout)
+        if result.returncode or len(devices) != 1:
+            raise ValueError("Mobile workflow requires exactly one connected device")
+        context = {
+            "device": devices[0],
+            "flavor": "stable",
+            "apk": "app/build/outputs/apk/stable/debug/app-stable-debug.apk",
+        }
+        if repair:
+            previous = (self.last_run or {}).get("mobile", {})
+            if any(previous.get(key) != value for key, value in context.items()):
+                raise ValueError(
+                    "Mobile repair requires the same device, flavor and APK as generation"
+                )
+            apk = self.path_for(context["apk"])
+            if not apk.is_file() or hashlib.sha256(apk.read_bytes()).hexdigest() != previous.get(
+                "apk_sha256"
+            ):
+                raise ValueError(
+                    "Mobile repair requires the APK from the original runner execution"
+                )
+        return context
+
+    def _run_test(self, target: str, *, format_sources: bool = True, repair: bool = False) -> dict:
         selected_test = self._selected_test(target)
         folder = self.output_dir / ("run-" + uuid.uuid4().hex)
         folder.mkdir()
-        (folder / "suite.log").write_text("API test command has not run.\n", encoding="utf-8")
+        (folder / "suite.log").write_text("Test command has not run.\n", encoding="utf-8")
         wrapper = ".\\gradlew.bat" if os.name == "nt" else "./gradlew"
         command = [
             wrapper,
             "--no-daemon",
-            ":api-tests:test",
+            f":{self.test_module}:test",
             "--rerun",
-            "-Dapi.url=http://127.0.0.1:8080",
             "--tests",
             target,
         ]
+        if self.layer == "api":
+            command.insert(4, "-Dapi.url=http://127.0.0.1:8080")
         command_text = " ".join(command)
 
         def relative(name: str) -> str:
@@ -411,6 +490,62 @@ class Repository(RepositoryWorkspace):
         executed_source_digest = None
         run = subprocess.CompletedProcess(command, 127, "Execution did not start")
         try:
+            mobile = None
+            runner_env = None
+            if self.layer == "mobile":
+                mobile = self._mobile_context(folder, repair)
+                apk = str(self.path_for(mobile["apk"]))
+                command[4:4] = [
+                    f"-Dapp.apk={apk}",
+                    f"-Dui.variant={mobile['flavor']}",
+                    f"-Dappium.devices={mobile['device']}",
+                ]
+                command_text = (
+                    subprocess.list2cmdline(command) if os.name == "nt" else shlex.join(command)
+                )
+                summary["mobile"] = mobile
+                if not repair:
+                    # The scripts use these flags through the Gradle JVM. A
+                    # daemon outside the owned process tree must not survive a timeout.
+                    runner_env = {
+                        "GRADLE_OPTS": os.getenv("GRADLE_OPTS", "") + " -Dorg.gradle.daemon=false",
+                        "FLAVOR": mobile["flavor"],
+                        "DEVICE": mobile["device"],
+                    }
+                    guarded = [part for part in command if part != "--no-daemon"]
+                    command_text = (
+                        subprocess.list2cmdline(guarded) if os.name == "nt" else shlex.join(guarded)
+                    )
+                    if os.name == "nt":
+                        command = [
+                            "powershell.exe",
+                            "-NoProfile",
+                            "-ExecutionPolicy",
+                            "Bypass",
+                            "-File",
+                            str(self.path_for("scripts/run-suite.ps1")),
+                            "-Flavor",
+                            mobile["flavor"],
+                            "-Device",
+                            mobile["device"],
+                            "-TestFilter",
+                            target,
+                        ]
+                    else:
+                        command = [
+                            "bash",
+                            str(self.path_for("scripts/run-suite.sh")),
+                            "--tests",
+                            target,
+                        ]
+                summary["command"] = (
+                    subprocess.list2cmdline(command) if os.name == "nt" else shlex.join(command)
+                )
+                summary["execution_mode"] = (
+                    "exact_mobile_repair" if repair else "mobile_suite_runner"
+                )
+                summary["guarded_command"] = command_text
+                summary["gradle_daemon"] = False
             # Formatting is a non-test command. Complete it before PRE starts the
             # guarded exact-target run, so a formatter failure consumes no run budget.
             if format_sources:
@@ -419,7 +554,7 @@ class Repository(RepositoryWorkspace):
                 summary["format_exit_code"] = run.returncode
                 if run.returncode:
                     raise RuntimeError(
-                        "API formatting did not complete within the permitted test layers; "
+                        "Test formatting did not complete within the permitted test layers; "
                         "inspect format_log"
                     )
             pre = self._hook("before", command_text, folder)
@@ -433,13 +568,19 @@ class Repository(RepositoryWorkspace):
                 previous_root = folder / "previous"
                 previous_root.mkdir()
                 summary["previous_results"] = relative("previous")
-                for name, path in TEST_RESULT_DIRECTORIES.items():
+                for name, path in self.result_directories.items():
                     source = self.path_for(path)
                     if source.exists():
                         shutil.move(source, previous_root / name)
                 executed_source_digest = self.source_fingerprint()
-                run = self._run(command, folder / "suite.log")
-                for name, path in TEST_RESULT_DIRECTORIES.items():
+                run = self._run(
+                    command, folder / "suite.log", **({"env": runner_env} if runner_env else {})
+                )
+                if mobile is not None:
+                    apk = self.path_for(mobile["apk"])
+                    if apk.is_file():
+                        mobile["apk_sha256"] = hashlib.sha256(apk.read_bytes()).hexdigest()
+                for name, path in self.result_directories.items():
                     source = self.path_for(path)
                     destination = folder / name
                     destination.mkdir()
@@ -452,6 +593,16 @@ class Repository(RepositoryWorkspace):
                 summary.update(
                     self.evidence_archive.summarize(folder, selected_test, run.returncode)
                 )
+                if mobile is not None and not repair and os.name == "nt":
+                    marker = re.search(
+                        r"Appium result: (\d+) passed, (\d+) failed, (\d+) errors, (\d+) skipped "
+                        r"\((\d+) total\) on ([^\s]+)",
+                        run.stdout,
+                    )
+                    if marker is None or int(marker[5]) != 1 or marker[6] != mobile["device"]:
+                        invalidate("Missing or mismatched fresh OS mobile runner result")
+                    else:
+                        summary["runner_result"] = marker[0]
         except ProcessCleanupError as error:
             execution_stopped = False
             invalidate(f"{error}; POST and result restoration were skipped")
@@ -468,6 +619,16 @@ class Repository(RepositoryWorkspace):
                 finally:
                     try:
                         self._restore_previous_results(folder, target)
+                        if self.layer == "mobile" and not repair:
+                            # The runner refreshes while older results are archived.
+                            # Restore its complete input before refreshing again.
+                            refreshed = self._run(
+                                self._hook_command("refresh"),
+                                folder / "queue-refresh.log",
+                                timeout=30,
+                            )
+                            if refreshed.returncode:
+                                invalidate("Repair queue refresh failed after result restoration")
                     except (OSError, ValueError) as error:
                         invalidate(f"Could not restore previous results: {error}")
         current_source_digest = self.source_fingerprint()
