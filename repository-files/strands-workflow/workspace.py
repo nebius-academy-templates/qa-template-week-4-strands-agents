@@ -37,10 +37,10 @@ _EXCLUDED_DIRECTORIES = frozenset(
 _SENSITIVE_FILE_NAMES = frozenset({"gradle.properties", "id_ed25519", "id_rsa", "local.properties"})
 _SENSITIVE_NAME_MARKERS = ("credential", "password", "secret")
 _WRITABLE_API_LAYERS = frozenset({"client", "model", "testdata", "tests"})
+_WRITABLE_MOBILE_LAYERS = frozenset({"actions", "pages", "testdata", "tests"})
 
-_API_TEST_SOURCE_ROOT = Path("api-tests", "src", "test", "kotlin")
 _PROTECTED_PATHS_FILE = PurePosixPath("scripts/protected-paths.txt")
-_CASE_ID = re.compile(r"API-[0-9]+\Z")
+_CASE_ID = re.compile(r"(?:API|MOB)-[0-9]+\Z")
 _WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
 
 _MAX_FILE_BYTES = 1_000_000
@@ -114,9 +114,9 @@ def _is_previous_results(name: str) -> bool:
 
 
 def validate_case_id(case_id: str) -> str:
-    """Return a canonical API case ID or raise a diagnostic error."""
+    """Return a canonical API or mobile case ID or raise a diagnostic error."""
     if not isinstance(case_id, str) or _CASE_ID.fullmatch(case_id) is None:
-        raise ValueError(f"case_id must match 'API-<digits>'; got {case_id!r}")
+        raise ValueError(f"case_id must match 'API-<digits>' or 'MOB-<digits>'; got {case_id!r}")
     return case_id
 
 
@@ -133,6 +133,9 @@ class RepositoryWorkspace:
             raise ValueError("output_dir must be below the repository root")
 
         self.case_id = validate_case_id(case_id)
+        self.layer = "mobile" if case_id.startswith("MOB-") else "api"
+        self.test_module = "appium-tests" if self.layer == "mobile" else "api-tests"
+        self.test_source_root = Path(self.test_module, "src", "test", "kotlin")
         self.changed_files: set[str] = set()
         self._original: dict[str, str] = {}
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -246,14 +249,15 @@ class RepositoryWorkspace:
                         return {"matches": matches, "truncated": True}
         return {"matches": matches, "truncated": False}
 
-    def _is_writable_api_source(self, relative: Path) -> bool:
+    def _is_writable_test_source(self, relative: Path) -> bool:
         try:
-            source = relative.relative_to(_API_TEST_SOURCE_ROOT)
+            source = relative.relative_to(self.test_source_root)
         except ValueError:
             return False
         return (
             len(source.parts) >= 2
-            and source.parts[0].casefold() in _WRITABLE_API_LAYERS
+            and source.parts[0].casefold()
+            in (_WRITABLE_MOBILE_LAYERS if self.layer == "mobile" else _WRITABLE_API_LAYERS)
             and source.suffix.casefold() == ".kt"
         )
 
@@ -273,13 +277,13 @@ class RepositoryWorkspace:
         )
 
     def writable_path(self, path: str) -> Path:
-        """Return an allowed API-test path, preserving protected repository files."""
+        """Return an allowed selected-suite path, preserving protected repository files."""
         file = self.path_for(path)
         relative = file.relative_to(self.root)
         plan = Path("agent_docs", "automation-plans", f"{self.case_id}.md")
-        is_allowed = relative == plan or self._is_writable_api_source(relative)
+        is_allowed = relative == plan or self._is_writable_test_source(relative)
         if not is_allowed or not self.is_readable(file) or self._is_protected(relative):
-            raise ValueError("write is outside the permitted API test layers")
+            raise ValueError("write is outside the permitted test layers")
         if file == self.root / plan and file.exists():
             existing = file.read_text(encoding="utf-8-sig")
             if self.case_id not in existing:
@@ -329,7 +333,7 @@ class RepositoryWorkspace:
         inventory is independent of both Git tracking and agent read permissions.
         """
         roots = (
-            "api-tests/src",
+            f"{self.test_module}/src",
             "fake-api/src",
             "gradle",
             "buildSrc",
@@ -338,6 +342,8 @@ class RepositoryWorkspace:
             "agent_docs",
             "scripts",
         )
+        if self.layer == "mobile":
+            roots += ("app/src",)
         names = {
             "AGENTS.md",
             "AI_POLICY.md",
@@ -346,7 +352,14 @@ class RepositoryWorkspace:
             "local.properties",
             "fake-api/openapi.yaml",
         }
-        for module in ("", "api-tests/", "fake-api/"):
+        if self.layer == "mobile":
+            names.update({"package.json", "package-lock.json"})
+        for module in (
+            "",
+            f"{self.test_module}/",
+            "fake-api/",
+            *(("app/",) if self.layer == "mobile" else ()),
+        ):
             names.update(
                 module + name
                 for name in (

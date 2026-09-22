@@ -73,7 +73,7 @@ def _stop_tree(process: subprocess.Popen, job: _WindowsJob | None) -> None:
         raise ProcessCleanupError(f"Could not stop the command process tree: {error}") from error
 
 
-def run_process(command: list[str], *, cwd: Path, input=None, timeout=900):
+def run_process(command: list[str], *, cwd: Path, input=None, timeout=900, env=None):
     """Capture output without pipes inherited by children keeping communicate alive."""
     job = _WindowsJob() if os.name == "nt" else None
     process = None
@@ -95,7 +95,7 @@ def run_process(command: list[str], *, cwd: Path, input=None, timeout=900):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+                env={**os.environ, **(env or {}), "PYTHONIOENCODING": "utf-8"},
                 start_new_session=job is None,
             )
             expired = None

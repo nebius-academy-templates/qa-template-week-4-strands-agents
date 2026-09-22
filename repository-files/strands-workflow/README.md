@@ -1,6 +1,6 @@
-# Evidence-backed API workflow with Strands
+# Evidence-backed API and mobile workflow with Strands
 
-This starter coordinates assigned API cases through readiness, generation and
+This starter coordinates assigned API and mobile cases through readiness, generation and
 fresh exact execution, conditional repair, and a final check against each case.
 Cases run in the supplied order with separate repository adapters. Cases that
 proceed to model execution also use a new graph.
@@ -32,6 +32,21 @@ Start the fake API at `http://127.0.0.1:8080` using `api-tests/README.md`
 before a live workflow run. The workflow uses this fixed backend address. Finish unrelated repair work first because the existing
 repair hook owns its queue and attempt counters.
 
+For a mobile case, also install `gen-mobile-test`, `run-appium-suite`, and
+`agent_docs/templates/automation_plan.mobile.workflow.md.template` from the
+workflow skills package. Apply this package's `AppiumTestCase.kt` overlay: it
+attaches both `Screen after step` screenshots and `UI page source` XML after
+successful steps. The workflow needs both when preparing mobile review evidence.
+Capture failures are attached separately and do not change a test's outcome;
+missing required captures produce `VERIFICATION_INCOMPLETE` and prevent review.
+
+Follow `appium-tests/README.md` and `run-appium-suite` for the Android SDK, pinned
+Appium setup and emulator settings. Keep exactly one Android device connected
+and booted, with animations disabled, and start the backend and Appium server.
+The host discovers that device and uses the `stable` APK flavor. It calls the
+existing OS suite runner for generation and the guarded exact-target Gradle run
+for repair; this CLI has no device or flavor selection flag.
+
 ## Set up the Python environment
 
 Run these commands from this `strands-workflow` directory.
@@ -52,21 +67,22 @@ python3 -m venv .venv
 
 Set either `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in the current environment.
 Do not put a key in this repository. Select the matching provider and an
-available model explicitly when running `main.py`. The analysis model handles
-readiness and the later review route. The implementation model identifies and
-automates the assigned test in generation, and handles conditional repair.
+available model for each role when running `main.py`: `--readiness-model`,
+`--generation-model`, `--repair-model`, and `--review-model`. Each option selects
+the model for that agent independently. The review model is used once the
+lesson's review route is connected.
 Anthropic generation and repair use effort `high` and `max_tokens=32768`;
 readiness and review use effort `medium` and `max_tokens=16384`. The token limit
 applies to each model response, including thinking tokens when used, rather
 than the entire stage. These Anthropic settings do not change the OpenAI
 configuration.
 
-Cases that proceed to model execution create one analysis model for
-readiness/review and one implementation model for generation/repair. Reused
+Roles with the same model ID and settings share a provider client. Each agent
+keeps separate conversation state, tools and output schemas. A reused readiness
+decision skips construction of the readiness agent and its model. Reused
 `BLOCKED` or `NEEDS_CLARIFICATION` decisions end the case without creating models.
-Agents receive the model instances explicitly and keep separate conversation
-state, tools and output schemas. The host closes each distinct client once,
-including clients created before a setup failure.
+The host closes each distinct client once, including clients created before
+a setup failure.
 
 ## How the application is assembled
 
@@ -78,39 +94,47 @@ The implementation keeps three concerns separate:
 | Available operations | Tool functions in `repository_tools.py`, backed by `repository.py` | Bound which files and commands each agent can use. |
 | Execution dependencies | Edges and conditions in `workflow.py` | Decide which completed result can start another operation. |
 
-`AgentSkills` loads `gen-api-test` and `test-repair` instructions on demand.
+`AgentSkills` loads the selected `gen-api-test` or `gen-mobile-test` skill and
+`test-repair` instructions on demand.
 It does not provide filesystem access, test execution, hook behavior, or proof
 of a successful run. The host application supplies those operations separately.
 
 | Agent | Instruction source | Supplied access |
 |---|---|---|
 | `readiness` | Existing readiness instructions | Read and search repository sources. |
-| `generation` | `gen-api-test` through `AgentSkills` | Check the assigned ID, create or validate the plan before changes, implement the selected case and run its exact method. |
+| `generation` | `gen-api-test` or `gen-mobile-test` through `AgentSkills` | Check the assigned ID, create or validate the plan before changes, implement the selected case and run its exact method. |
 | `repair` | `test-repair` through `AgentSkills` | Diagnose the selected target, use the existing queue, edit permitted test layers, and rerun that exact target. |
 | `review` | Case-check section of `automate-test-case` | Receive the complete case, final test, optional plan and exact-target evidence; inspect called helpers and contracts with restricted `read_file` and `search_text` tools. It may make at most 20 model calls, including structured output. |
 
 Every role also receives the complete original case, `AGENTS.md`, and
-`agent_docs/AI_POLICY.md`. Generation implements the assigned case under its
-assigned Allure ID. It reuses and completes that case's existing method when
-needed. A test under another ID is only an implementation reference. An ID
-occupied by unrelated behavior or multiple methods produces `BLOCKED`.
-Coverage assessment is a separate request.
+`agent_docs/AI_POLICY.md`. The case ID selects the suite: `API-*` uses
+`api-tests`, and `MOB-*` uses `appium-tests`. API generation implements the
+assigned case under its Allure ID and completes that case's existing method
+when needed. An unrelated or duplicate assigned ID produces `BLOCKED`.
+Mobile generation follows `gen-mobile-test` coverage preflight: existing full
+coverage or an occupied assigned ID produces `BLOCKED` with source evidence;
+an uncovered case proceeds to its plan, implementation and exact run.
 
-For a repeated batch, pass `--skip-implemented` to skip fully implemented assigned
-cases. Before edits or execution, generation compares the existing test and its
+For a repeated API batch, pass `--skip-implemented` to skip fully implemented
+assigned API cases. Before edits or execution, generation compares the existing test and its
 helpers with the complete case. If every requirement is implemented by an enabled
 test, it returns `ALREADY_IMPLEMENTED` with the target and requirement-to-source
 mapping. The host checks the unique assigned ID and unchanged source fingerprint.
 The semantic comparison remains the model's assessment. The case then ends
 without execution or final review, and the batch continues. This status does not
 claim a fresh passing run. Incomplete tests still require implementation and
-verification; without the flag, existing tests also require fresh execution.
+verification; without the flag, existing API tests also require fresh execution.
+Mobile cases retain their skill's coverage preflight; this option does not override it.
 Missing, stale or mismatched execution proof produces `VERIFICATION_INCOMPLETE`.
 
 The supplied review invocation hook replaces graph task history with one
 `_review_packet` JSON message. The version 2 packet contains the full selected
 case; the line-numbered target test; the case plan when present; whitelisted
-JUnit and Allure summaries; and ordered HTTP request/response attachments.
+JUnit and Allure summaries; and ordered HTTP request/response attachments for
+API tests. Mobile review receives the ordered Allure steps, runtime UI hierarchy
+summaries and labeled PNG images as native model image content. Matching step
+paths connect each image and XML capture; captures are sequential observations,
+not an atomic snapshot, and do not replace the test's assertions.
 The reviewer reads called helpers, including their assertions, and relevant
 contracts through `read_file` and `search_text`. These tools expose source and
 contract documents; execution artifacts remain available only in the packet.
@@ -121,7 +145,7 @@ review invalidates the final execution claim.
 
 Each packet artifact records its repository path, MIME type, byte size, and
 SHA-256 digest. The run report also records a manifest for the selected JUnit
-testcase, complete raw Allure result, and each ordered HTTP attachment. Review
+testcase, complete raw Allure result, and the HTTP or UI attachments. Review
 compares the assembled packet with that manifest, then rechecks the archive and
 current execution evidence before returning it. The Allure summary and hash use
 the same captured bytes. Raw Allure parameters, details, host/thread metadata,
@@ -130,7 +154,11 @@ is converted to text. Authorization, cookie, API-key, sandbox-session, and token
 values are redacted before model input. Missing, ambiguous, unsafe, non-text,
 stale, or oversized required evidence stops review instead of producing a
 partial packet. The complete packet is limited to 128 KiB; each HTTP attachment
-is limited to 16 KiB and HTTP evidence to 64 KiB total.
+is limited to 16 KiB and HTTP evidence to 64 KiB total. Mobile packets have a
+256 KiB text limit, up to 20 screenshots, a 5 MiB and 16-million-pixel limit per
+image, and 20 MiB of images total. UI XML is limited to 256 KiB per attachment;
+its bounded element summaries mark any omitted details. Password fields are
+redacted from those summaries. Screenshots retain their visible screen content.
 
 For workbook input, the host reuses only exact readiness values from
 `Case Summary.Automated Test`: `READY FOR AUTOMATION`, `BLOCKED`, and
@@ -154,7 +182,7 @@ matching execution evidence. `workspace.py` restricts file access, `repository.p
 integrates guarded execution, and `evidence.py` validates archived JUnit and Allure
 results against the selected target and current source fingerprint.
 
-Generation and repair format the permitted API test layers before PRE and run
+Generation and repair format the permitted layers of the selected test suite before PRE and run
 only the selected `package.Class.method`. Formatter changes to files outside the
 selected test and files edited by this workflow are restored. Repair starts only
 from a confirmed failure of that method and must verify the same target. A full regression suite
@@ -172,8 +200,9 @@ Each invocation writes a batch report to
 results are stored under `cases/001-<case-id>/`, `cases/002-<case-id>/`, and so
 on. Each per-case report contains a terminal `next_action` computed from its
 final status, and the batch copies that action into the corresponding case
-entry. The batch report records the analysis and implementation models and the
-selected readiness mode. Each per-case report records one of `model`,
+entry. The batch report records the selected model ID for each of the four roles,
+including any role skipped during this run, and the selected readiness mode.
+Each per-case report records one of `model`,
 `model_reassessment`, `workbook_status`, or `prepared_preflight` as the
 readiness source. Reused and deterministic readiness also have a standalone
 `readiness.json`; they are recorded stages but are not counted as model graph
@@ -274,8 +303,8 @@ incomplete comparison, unverified claim or unresolved question produces
 
 ## Run
 
-Use the completed graph with one or more assigned complete API cases. Start the
-backend, set the provider key, and run from `strands-workflow/`. Supply case IDs
+Use the completed graph with one or more assigned complete API or mobile cases. Start the
+backend and any required mobile services, set the provider key, and run from `strands-workflow/`. Supply case IDs
 in their required execution order. This example uses two workbook cases;
 replace the IDs and model with the assigned values. A `.md` or `.txt` case file
 can be used only when one case ID is supplied, and its content must explicitly
@@ -287,18 +316,23 @@ worksheets with their standard columns: `Case ID`, `Title`, `Description`,
 .\.venv\Scripts\python.exe main.py `
   --repo .. `
   --case-file ..\test-cases\test-cases.xlsx `
-  --case-id FIRST_CASE_ID SECOND_CASE_ID `
+  --case-id API-2010 MOB-1007 `
   --provider anthropic `
-  --model claude-opus-5 `
-  --analysis-model claude-sonnet-5 `
-  --prepared-cases
+  --readiness-model claude-sonnet-5 `
+  --generation-model claude-opus-5 `
+  --review-model claude-sonnet-5
 ```
 
 The readiness options are described under
 [How the application is assembled](#how-the-application-is-assembled).
-For Anthropic, omitting `--analysis-model` uses `claude-sonnet-5` for readiness
-and review. For OpenAI, `--model` is used for every role unless
-`--analysis-model` is supplied.
+`--generation-model` is required; repair defaults to that model when
+`--repair-model` is omitted. Readiness and review default to `claude-sonnet-5`
+for Anthropic or the generation model for OpenAI. Use `--repair-model` when repair should use a different model.
+
+Existing commands remain supported: `--model` is an alias for
+`--generation-model`; `--analysis-model` supplies the readiness and review defaults.
+An explicit `--readiness-model` or `--review-model` overrides that legacy default
+for its role. Use the four role-specific flags in new commands.
 
 On macOS or Linux, use `./.venv/bin/python`, forward slashes, and shell line
 continuations. Inspect the batch `result.json`, each per-case result and stage

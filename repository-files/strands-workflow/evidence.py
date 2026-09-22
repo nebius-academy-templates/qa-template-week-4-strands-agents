@@ -5,12 +5,73 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import struct
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
 
 from workspace import RepositoryWorkspace
 
 ARCHIVE_AREAS = frozenset({"allure", "junit"})
+MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024
+MAX_SCREENSHOT_PIXELS = 16_000_000
+MAX_MOBILE_SCREENSHOTS = 20
+MAX_UI_PAGE_SOURCE_BYTES = 256 * 1024
+
+
+def parse_ui_page_source(raw: bytes) -> ET.Element:
+    """Parse bounded Android UI XML, without accepting DTDs or entities."""
+    if len(raw) > MAX_UI_PAGE_SOURCE_BYTES:
+        raise ValueError("UI page source exceeds the evidence limit")
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise ValueError("UI page source is not UTF-8 text") from error
+    if re.search(r"<!\s*(?:DOCTYPE|ENTITY)\b", text, re.IGNORECASE):
+        raise ValueError("UI page source must not contain a DTD or entity declarations")
+    try:
+        return ET.fromstring(text)
+    except ET.ParseError as error:
+        raise ValueError("UI page source is not valid XML") from error
+
+
+def mobile_step_evidence_reasons(artifacts: dict) -> list[str]:
+    """Require a paired screenshot and XML capture for every completed step."""
+    steps = artifacts.get("steps", [])
+    attachments = artifacts["attachments"]
+    reasons = []
+    if not steps:
+        reasons.append("Mobile evidence has no recorded scenario steps")
+    for step in steps:
+        label = ".".join(map(str, step["step_path"]))
+        if step["status"] != "passed":
+            reasons.append(f"Mobile step {label} has no passing step result")
+            continue
+        selected = [item for item in attachments if item["step_path"] == step["step_path"]]
+        for name in ("Screen after step", "UI page source"):
+            matches = [item for item in selected if item["metadata"].get("name") == name]
+            if len(matches) != 1:
+                reasons.append(f"Mobile step {label} requires exactly one {name} attachment")
+            elif matches[0]["error"] or matches[0]["path"] is None:
+                reasons.append(f"Mobile step {label} has missing or unsafe {name} evidence")
+    screenshot_count = sum(item["kind"] == "screenshot" for item in attachments)
+    if screenshot_count > MAX_MOBILE_SCREENSHOTS:
+        reasons.append(
+            f"Mobile evidence contains {screenshot_count} screenshots; "
+            f"the explicit review limit is {MAX_MOBILE_SCREENSHOTS}"
+        )
+    return reasons
+
+
+def png_dimensions(raw: bytes) -> tuple[int, int]:
+    """Read bounded Appium screenshot dimensions without decoding the PNG."""
+    if len(raw) > MAX_SCREENSHOT_BYTES or not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError("Screenshot must be a bounded PNG image")
+    if len(raw) < 33 or raw[8:16] != b"\x00\x00\x00\rIHDR":
+        raise ValueError("Screenshot PNG has no complete IHDR header")
+    width, height = struct.unpack_from(">II", raw, 16)
+    if not width or not height or width * height > MAX_SCREENSHOT_PIXELS:
+        raise ValueError("Screenshot PNG dimensions exceed the image limit")
+    return width, height
 
 
 class ExecutionEvidence:
@@ -60,6 +121,19 @@ class ExecutionEvidence:
             return "response"
         return ""
 
+    def _attachment_kind(self, metadata: dict) -> str:
+        if getattr(self.workspace, "layer", "api") == "api":
+            return self._http_attachment_kind(str(metadata.get("name", "")))
+        name = metadata.get("name", "")
+        if not isinstance(name, str):
+            raise ValueError("UI attachment name must be text")
+        return {
+            "Screen after step": "screenshot",
+            "Failure screenshot": "screenshot",
+            "UI page source": "page_source",
+            "Device logcat": "logcat",
+        }.get(name, "")
+
     def select(self, folder: Path, selected_test: dict) -> dict:
         """Parse and match the exact artifacts used by evidence and review."""
         cases = []
@@ -99,8 +173,10 @@ class ExecutionEvidence:
             if record["report"].get("fullName") == selected_test["target"]
         ]
         attachments = []
+        recorded_steps = []
+        mobile = getattr(self.workspace, "layer", "api") == "mobile"
 
-        def collect(node) -> None:
+        def collect(node, step_path: tuple[int, ...] = ()) -> None:
             if not isinstance(node, dict):
                 raise ValueError("Allure step must be an object")
             entries = node.get("attachments", [])
@@ -111,6 +187,13 @@ class ExecutionEvidence:
                 or any(not isinstance(entry, dict) for entry in entries)
             ):
                 raise ValueError("Allure steps and attachments must be lists of objects")
+            if step_path:
+                recorded_steps.append({"step_path": list(step_path), "status": node.get("status")})
+            if mobile:
+                # AppiumTestCase captures after the step body. Nested steps
+                # finish before their parent captures its resulting screen.
+                for ordinal, step in enumerate(steps, 1):
+                    collect(step, (*step_path, ordinal))
             for entry in entries:
                 source = entry.get("source", "")
                 try:
@@ -119,19 +202,21 @@ class ExecutionEvidence:
                         if isinstance(source, str) and source
                         else None
                     )
-                    error = "" if path else "Missing or unsafe HTTP attachment"
+                    error = "" if path else "Missing or unsafe execution attachment"
                 except ValueError:
-                    path, error = None, "Missing or unsafe HTTP attachment"
+                    path, error = None, "Missing or unsafe execution attachment"
                 attachments.append(
                     {
                         "metadata": entry,
                         "path": path,
                         "error": error,
-                        "kind": self._http_attachment_kind(str(entry.get("name", ""))),
+                        "kind": self._attachment_kind(entry),
+                        "step_path": list(step_path),
                     }
                 )
-            for step in steps:
-                collect(step)
+            if not mobile:
+                for ordinal, step in enumerate(steps, 1):
+                    collect(step, (*step_path, ordinal))
 
         if len(selected_allure) == 1:
             collect(selected_allure[0]["report"])
@@ -141,6 +226,7 @@ class ExecutionEvidence:
             "selected_junit": selected_junit,
             "selected_allure": selected_allure,
             "attachments": attachments,
+            "steps": recorded_steps,
         }
 
     def manifest(self, artifacts: dict, target: str) -> dict:
@@ -160,24 +246,38 @@ class ExecutionEvidence:
 
         junit_raw = ET.tostring(junit[0]["case"], encoding="utf-8")
         allure_raw = allure[0]["raw"]
-        http = []
+        mobile = getattr(self.workspace, "layer", "api") == "mobile"
+        if mobile:
+            reasons = mobile_step_evidence_reasons(artifacts)
+            if reasons:
+                raise ValueError("; ".join(reasons))
+        selected = []
         for attachment in artifacts["attachments"]:
             if not attachment["kind"]:
                 continue
             if attachment["error"] or attachment["path"] is None:
-                raise ValueError("exact evidence has a missing or unsafe HTTP attachment")
+                raise ValueError("exact evidence has a missing or unsafe execution attachment")
             path = attachment["path"]
-            item = identity(path, path.read_bytes(), "full-attachment")
-            item.update(index=len(http), kind=attachment["kind"])
-            http.append(item)
-        if {item["kind"] for item in http} != {"request", "response"}:
+            raw = path.read_bytes()
+            if mobile and attachment["kind"] == "screenshot":
+                png_dimensions(raw)
+            if mobile and attachment["kind"] == "page_source":
+                parse_ui_page_source(raw)
+            item = identity(path, raw, "full-attachment")
+            item.update(index=len(selected), kind=attachment["kind"])
+            if mobile:
+                item["step_path"] = attachment["step_path"]
+            selected.append(item)
+        if mobile and not any(item["kind"] == "screenshot" for item in selected):
+            raise ValueError("exact mobile evidence requires screenshot attachments")
+        if not mobile and {item["kind"] for item in selected} != {"request", "response"}:
             raise ValueError("exact evidence requires HTTP request and response attachments")
         return {
             "version": 1,
             "target": target,
             "junit": identity(junit[0]["path"], junit_raw, "matching-testcase"),
             "allure": identity(allure[0]["path"], allure_raw, "full-result"),
-            "http": http,
+            "ui" if mobile else "http": selected,
         }
 
     def summarize(
@@ -207,11 +307,12 @@ class ExecutionEvidence:
         ):
             reasons.append(f"Missing, ambiguous, or unsuccessful evidence for {target}")
         attachments = artifacts["attachments"]
-        target_reasons = [
-            "Missing or unsafe HTTP attachment" for attachment in attachments if attachment["error"]
-        ]
+        mobile = getattr(self.workspace, "layer", "api") == "mobile"
+        target_reasons = [attachment["error"] for attachment in attachments if attachment["error"]]
         kinds = [attachment["kind"] for attachment in attachments]
-        if "request" not in kinds or "response" not in kinds:
+        if mobile:
+            target_reasons.extend(mobile_step_evidence_reasons(artifacts))
+        if not mobile and ("request" not in kinds or "response" not in kinds):
             target_reasons.append("Target has no attached HTTP request/response evidence")
         if len(selected_allure) != 1 or len(selected_junit) != 1:
             target_reasons.append("Target must have exactly one matching JUnit and Allure result")

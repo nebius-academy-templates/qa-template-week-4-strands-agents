@@ -10,13 +10,25 @@ from copy import deepcopy
 from html.parser import HTMLParser
 from pathlib import Path
 
+from evidence import (
+    MAX_MOBILE_SCREENSHOTS,
+    mobile_step_evidence_reasons,
+    parse_ui_page_source,
+    png_dimensions,
+)
+
 SCHEMA = "ai-for-qa/exact-api-review-packet"
+MOBILE_SCHEMA = "ai-for-qa/exact-mobile-review-packet"
 VERSION = 2
 MAX_PACKET_BYTES = 128 * 1024
+MOBILE_MAX_PACKET_BYTES = 256 * 1024
 MAX_CASE_BYTES = 32 * 1024
 MAX_SOURCE_BYTES = 64 * 1024
 MAX_HTTP_ATTACHMENT_BYTES = 16 * 1024
 MAX_HTTP_BYTES = 64 * 1024
+MAX_UI_TEXT_BYTES = 256 * 1024
+MAX_REVIEW_IMAGES = MAX_MOBILE_SCREENSHOTS
+MAX_REVIEW_IMAGE_BYTES = 20 * 1024 * 1024
 TEXT_MIME_TYPES = {
     "application/json",
     "application/xml",
@@ -139,7 +151,9 @@ def _normalized_http_name(kind: str, metadata: dict) -> str:
     return f"HTTP response {match[1]}" if match else "HTTP response"
 
 
-def _safe_allure_summary(report: dict, attachment_indices: dict[int, tuple[int, str]]) -> dict:
+def _safe_allure_summary(
+    report: dict, attachment_indices: dict[int, tuple[int, str]], mobile: bool = False
+) -> dict:
     """Keep review-relevant Allure structure without arbitrary result fields."""
 
     def status(value) -> str:
@@ -152,8 +166,17 @@ def _safe_allure_summary(report: dict, attachment_indices: dict[int, tuple[int, 
             if reference is None:
                 continue
             index, kind = reference
+            name = (
+                {
+                    "screenshot": "Screenshot",
+                    "page_source": "UI page source",
+                    "logcat": "Device logcat",
+                }[kind]
+                if mobile
+                else _normalized_http_name(kind, metadata)
+            )
             result.append(
-                {"http_index": index, "kind": kind, "name": _normalized_http_name(kind, metadata)}
+                {"ui_index" if mobile else "http_index": index, "kind": kind, "name": name}
             )
         return result
 
@@ -163,7 +186,7 @@ def _safe_allure_summary(report: dict, attachment_indices: dict[int, tuple[int, 
             item = {
                 "ordinal": ordinal,
                 "status": status(step.get("status")),
-                "http_attachments": attachments(step),
+                "ui_attachments" if mobile else "http_attachments": attachments(step),
                 "steps": steps(step),
             }
             result.append(item)
@@ -180,14 +203,15 @@ def _safe_allure_summary(report: dict, attachment_indices: dict[int, tuple[int, 
         "full_name": str(report.get("fullName", "")),
         "status": status(report.get("status")),
         "allure_ids": allure_ids,
-        "http_attachments": attachments(report),
+        "ui_attachments" if mobile else "http_attachments": attachments(report),
         "steps": steps(report),
     }
 
 
 def encode_review_packet(packet: dict) -> bytes:
     encoded = json.dumps(packet, indent=2, ensure_ascii=False).encode("utf-8")
-    if len(encoded) > MAX_PACKET_BYTES:
+    limit = MOBILE_MAX_PACKET_BYTES if packet.get("schema") == MOBILE_SCHEMA else MAX_PACKET_BYTES
+    if len(encoded) > limit:
         raise ValueError("Complete review packet exceeds its total size limit")
     return encoded
 
@@ -204,23 +228,156 @@ def evidence_manifest_from_packet(packet: dict) -> dict:
         }
 
     evidence = packet["evidence"]
+    mobile = "ui" in evidence
+    area = "ui" if mobile else "http"
     return {
         "version": 1,
         "target": packet["target"]["name"],
         "junit": identity(evidence["junit"], "matching-testcase"),
         "allure": identity(evidence["allure"], "full-result"),
-        "http": [
+        area: [
             {
                 **identity(attachment, "full-attachment"),
                 "index": attachment["index"],
                 "kind": attachment["kind"],
+                **({"step_path": attachment["step_path"]} if mobile else {}),
             }
-            for attachment in evidence["http"]
+            for attachment in evidence[area]
         ],
     }
 
 
-def build_review_packet(
+def _page_source_summary(text: str) -> dict:
+    """Retain Android UI hierarchy and locator/state fields, including classic Views."""
+    tree = parse_ui_page_source(text.encode("utf-8"))
+    attributes = {
+        "resource-id",
+        "class",
+        "text",
+        "content-desc",
+        "bounds",
+        "enabled",
+        "checked",
+        "selected",
+        "clickable",
+        "displayed",
+        "index",
+        "package",
+        "checkable",
+        "focusable",
+        "focused",
+        "scrollable",
+        "long-clickable",
+    }
+    elements = []
+    pending = [(tree, None)]
+    while pending:
+        node, parent_index = pending.pop()
+        node_index = len(elements)
+        item = {name: _redact(value) for name, value in node.attrib.items() if name in attributes}
+        item.update(node_index=node_index, parent_index=parent_index)
+        if node.get("password", "").lower() == "true":
+            for name in ("text", "content-desc"):
+                if name in item:
+                    item[name] = "[REDACTED]"
+        elements.append(item)
+        pending.extend((child, node_index) for child in reversed(list(node)))
+    return {
+        "elements": elements,
+        "truncated": False,
+        "truncation_reasons": [],
+    }
+
+
+def _ui_attachment_content(kind: str, raw: bytes) -> dict:
+    if kind == "screenshot":
+        width, height = png_dimensions(raw)
+        return {
+            "mime_type": "image/png",
+            "content": "",
+            "width": width,
+            "height": height,
+            "content_scope": "image-supplied-separately",
+        }
+
+    if len(raw) > MAX_UI_TEXT_BYTES:
+        raise ValueError("UI text attachment exceeds the review packet limit")
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise ValueError("UI attachment is not UTF-8 text") from error
+
+    if kind == "page_source":
+        summary = _page_source_summary(text)
+        return {
+            "mime_type": "application/xml",
+            "content": json.dumps(summary, ensure_ascii=False),
+            "content_scope": "whitelisted-element-summary",
+            "content_mime_type": "application/json",
+            "resource_ids": sorted(
+                {item["resource-id"] for item in summary["elements"] if item.get("resource-id")}
+            ),
+            "truncated": summary["truncated"],
+            "truncation_reasons": summary["truncation_reasons"],
+        }
+
+    return {
+        "mime_type": "text/plain",
+        "content": _redact(text[: 16 * 1024]),
+        "content_scope": "redacted-logcat-excerpt",
+        "truncated": len(text) > 16 * 1024,
+    }
+
+
+def _ui_attachments(repository, artifacts: dict) -> tuple[list[dict], dict, list[dict]]:
+    reasons = mobile_step_evidence_reasons(artifacts)
+    if reasons:
+        raise ValueError("; ".join(reasons))
+    selected, indices = [], {}
+    screenshots = []
+    image_bytes = 0
+    for attachment in artifacts["attachments"]:
+        kind = attachment["kind"]
+        if not kind:
+            continue
+        if attachment["error"] or attachment["path"] is None:
+            raise ValueError("Required UI attachment is missing or unsafe")
+        path = attachment["path"]
+        raw = path.read_bytes()
+        if kind == "screenshot":
+            image_bytes += len(raw)
+            if image_bytes > MAX_REVIEW_IMAGE_BYTES:
+                raise ValueError("Complete screenshot evidence exceeds the 20 MiB image limit")
+        index = len(selected)
+        indices[id(attachment["metadata"])] = (index, kind)
+        item = _artifact(
+            repository.root,
+            path,
+            raw=raw,
+            index=index,
+            kind=kind,
+            step_path=attachment["step_path"],
+            scope="full-attachment",
+            **_ui_attachment_content(kind, raw),
+        )
+        selected.append(item)
+        if kind == "screenshot":
+            screenshots.append((item, raw))
+    if not 1 <= len(screenshots) <= MAX_REVIEW_IMAGES:
+        raise ValueError(f"Mobile review requires between 1 and {MAX_REVIEW_IMAGES} screenshots")
+    image_blocks = []
+    for ordinal, (item, raw) in enumerate(screenshots, 1):
+        item["image_included"] = True
+        item["image_ordinal"] = ordinal
+        step = ".".join(map(str, item["step_path"])) or "test result"
+        image_blocks.append(
+            {"text": f"Screenshot {ordinal}: UI attachment index {item['index']}; step {step}."}
+        )
+        image_blocks.append({"image": {"format": "png", "source": {"bytes": raw}}})
+    return selected, indices, image_blocks
+
+
+def build_review_input(
     repository,
     case: str,
     target: str,
@@ -228,15 +385,16 @@ def build_review_packet(
     target_record: dict,
     artifacts: dict,
     junit_status: str,
-) -> dict:
-    """Serialize the already-selected exact test and current run artifacts."""
+) -> tuple[dict, list[dict]]:
+    """Build the JSON packet and native images from the same selected artifact bytes."""
     if len(case.encode("utf-8")) > MAX_CASE_BYTES:
         raise ValueError("Selected case exceeds the review packet limit")
 
     http = []
+    mobile = getattr(repository, "layer", "api") == "mobile"
     http_bytes = 0
     attachment_indices: dict[int, tuple[int, str]] = {}
-    for attachment in artifacts["attachments"]:
+    for attachment in () if mobile else artifacts["attachments"]:
         if not attachment["kind"]:
             continue
         if attachment["error"] or attachment["path"] is None:
@@ -273,8 +431,12 @@ def build_review_packet(
                 scope="full-attachment",
             )
         )
-    if {item["kind"] for item in http} != {"request", "response"}:
+    if not mobile and {item["kind"] for item in http} != {"request", "response"}:
         raise ValueError("Review requires ordered HTTP request and response attachment text")
+    ui = []
+    image_blocks = []
+    if mobile:
+        ui, attachment_indices, image_blocks = _ui_attachments(repository, artifacts)
 
     test = _source(repository, repository.path_for(target_record["path"]), "text/x-kotlin")
     plan_path = repository.root / f"agent_docs/automation-plans/{repository.case_id}.md"
@@ -285,7 +447,7 @@ def build_review_packet(
     junit_summary = {"target": target, "status": junit_status}
     allure = artifacts["selected_allure"][0]
     allure_raw = allure["raw"]
-    allure_summary = _safe_allure_summary(allure["report"], attachment_indices)
+    allure_summary = _safe_allure_summary(allure["report"], attachment_indices, mobile)
     evidence_summary = {
         key: deepcopy(evidence[key])
         for key in (
@@ -303,7 +465,7 @@ def build_review_packet(
         if key in evidence
     }
     packet = {
-        "schema": SCHEMA,
+        "schema": MOBILE_SCHEMA if mobile else SCHEMA,
         "version": VERSION,
         "case": {"case_id": repository.case_id, "text": case},
         "target": {"name": target, "source_digest": evidence["source_digest"]},
@@ -330,7 +492,7 @@ def build_review_packet(
                 scope="full-result",
                 content_scope="whitelisted-summary",
             ),
-            "http": http,
+            "ui" if mobile else "http": ui if mobile else http,
         },
     }
-    return packet
+    return packet, image_blocks

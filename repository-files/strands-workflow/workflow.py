@@ -310,7 +310,7 @@ def run_workflow(
         if graph is None:
             asyncio.run(close_model_clients(agent.model for agent in agents.values()))
     task = (
-        f"Complete the API automation workflow for {repository.case_id}. "
+        f"Complete the test automation workflow for {repository.case_id}. "
         "The request includes the selected readiness decision, automation of this case "
         "and exact execution, repair of an evidence-backed "
         "test automation defect if needed, and local read-only review. Keep the complete "
