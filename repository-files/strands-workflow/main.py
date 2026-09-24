@@ -51,25 +51,6 @@ def resolve_analysis_model(provider: str, model: str, analysis_model: str | None
     return "claude-sonnet-5" if provider == "anthropic" else model
 
 
-def resolve_role_models(
-    provider: str,
-    model: str,
-    analysis_model: str | None = None,
-    *,
-    readiness_model: str | None = None,
-    repair_model: str | None = None,
-    review_model: str | None = None,
-) -> dict[str, str]:
-    """Resolve each role while retaining the earlier shared-model options."""
-    analysis = resolve_analysis_model(provider, model, analysis_model)
-    return {
-        "generation": model,
-        "readiness": readiness_model if readiness_model is not None else analysis,
-        "repair": repair_model if repair_model is not None else model,
-        "review": review_model if review_model is not None else analysis,
-    }
-
-
 def initial_readiness(
     case: CaseInput,
     prepared_cases: bool,
@@ -137,10 +118,6 @@ def run_cases(
     prepared_cases: bool = False,
     reassess_readiness: bool = False,
     skip_implemented: bool = False,
-    *,
-    readiness_model: str | None = None,
-    repair_model: str | None = None,
-    review_model: str | None = None,
 ) -> tuple[dict, Path]:
     """Run isolated single-case graphs in the requested order."""
     validate_case_selection(case_ids, case_path)
@@ -161,18 +138,14 @@ def run_cases(
     if skip_implemented:
         accepted.add("ALREADY_IMPLEMENTED")
     stopped = False
-    selected_models = resolve_role_models(
-        provider,
-        model,
-        analysis_model,
-        readiness_model=readiness_model,
-        repair_model=repair_model,
-        review_model=review_model,
-    )
+    selected_analysis_model = resolve_analysis_model(provider, model, analysis_model)
     report_path = output_dir / "result.json"
     report = {
         "batch_status": "RUNNING",
-        "models": selected_models,
+        "models": {
+            "analysis": selected_analysis_model,
+            "implementation": model,
+        },
         "readiness_mode": (
             "reassess"
             if reassess_readiness
@@ -237,30 +210,18 @@ def run_cases(
             )
             agents = {}
             if assessment is None or assessment.status == "READY":
-                clients = {}
-                role_clients = {}
-                role_settings = {
-                    "generation": IMPLEMENTATION_SETTINGS,
-                    "repair": IMPLEMENTATION_SETTINGS,
-                    "review": ANALYSIS_SETTINGS,
-                }
-                if assessment is None:
-                    role_settings["readiness"] = ANALYSIS_SETTINGS
+                analysis = implementation = None
                 try:
-                    for role, settings in role_settings.items():
-                        key = (selected_models[role], settings)
-                        if key not in clients:
-                            clients[key] = make_model(provider, selected_models[role], settings)
-                        role_clients[role] = clients[key]
+                    analysis = make_model(provider, selected_analysis_model, ANALYSIS_SETTINGS)
+                    implementation = make_model(provider, model, IMPLEMENTATION_SETTINGS)
                     agents = make_agents(
                         adapter,
-                        generation_model=role_clients["generation"],
-                        repair_model=role_clients["repair"],
-                        review_model=role_clients["review"],
-                        readiness_model=role_clients.get("readiness"),
+                        analysis_model=analysis,
+                        implementation_model=implementation,
+                        include_readiness=assessment is None,
                     )
                 except BaseException:
-                    asyncio.run(close_model_clients(clients.values()))
+                    asyncio.run(close_model_clients((analysis, implementation)))
                     raise
             phase = "workflow"
             result = run_workflow(
@@ -314,21 +275,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--case-file", type=Path, required=True)
     parser.add_argument("--case-id", nargs="+", required=True, metavar="API-NNNN|MOB-NNNN")
     parser.add_argument("--provider", choices=("anthropic", "openai"), required=True)
-    generation = parser.add_mutually_exclusive_group(required=True)
-    generation.add_argument("--generation-model", help="Generation model")
-    generation.add_argument("--model", dest="generation_model", help=argparse.SUPPRESS)
+    parser.add_argument("--model", required=True, help="Generation and repair model")
     parser.add_argument(
-        "--readiness-model",
+        "--analysis-model",
         help=(
-            "Readiness model (default: claude-sonnet-5 for Anthropic, generation model for OpenAI)"
+            "Readiness and review model; defaults to claude-sonnet-5 for "
+            "Anthropic and --model for OpenAI"
         ),
     )
-    parser.add_argument("--repair-model", help="Repair model (default: generation model)")
-    parser.add_argument(
-        "--review-model",
-        help="Review model (default: claude-sonnet-5 for Anthropic, generation model for OpenAI)",
-    )
-    parser.add_argument("--analysis-model", help=argparse.SUPPRESS)
     readiness = parser.add_mutually_exclusive_group()
     readiness.add_argument(
         "--prepared-cases",
@@ -365,15 +319,12 @@ def main(argv: list[str] | None = None) -> int:
         case_path,
         args.case_id,
         args.provider,
-        args.generation_model,
+        args.model,
         export_otel=args.otel,
         analysis_model=args.analysis_model,
         prepared_cases=args.prepared_cases,
         reassess_readiness=args.reassess_readiness,
         skip_implemented=args.skip_implemented,
-        readiness_model=args.readiness_model,
-        repair_model=args.repair_model,
-        review_model=args.review_model,
     )
     print(
         json.dumps(
