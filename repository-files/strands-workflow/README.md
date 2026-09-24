@@ -256,6 +256,26 @@ the existing repair state and start a new invocation.
 
 ## Prompt caching and observability
 
+Before creating provider models, the application saves the initial batch report
+and prints its path. It then prints a short message when each stage starts and
+its finalized status when the stage finishes. Interrupted stages report
+`VERIFICATION_INCOMPLETE`; inspect the saved error fields and `error.log` for
+details. After adding the review evidence check in lesson 4.5, a cancelled review
+has no `started` message because its agent did not run.
+
+```text
+Batch report: /project/.agent-state/qa-workflow/<run-id>/result.json
+[API-2009] generation: started
+[API-2009] generation: VERIFIED
+```
+
+Progress is flushed immediately to stderr without prompts, tool arguments,
+tool results, model responses or exception messages. The final JSON summary
+remains on stdout. Stage JSON files are saved when a stage finishes or fails.
+The initial batch report is available while the first stage is running; it is
+not a live trace of every model request. A stage can spend time in a model or
+tool call between progress messages.
+
 For Anthropic, `tokens.total` is uncached input plus output; `cache_read_input`
 and `cache_write_input` are reported separately. For OpenAI, cached prompt tokens
 are already included in `tokens.input` and `tokens.total`, so do not add them again.

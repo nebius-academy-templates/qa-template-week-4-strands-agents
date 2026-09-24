@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import logging
+import sys
 import traceback
 from collections.abc import Iterable
 
@@ -226,6 +227,9 @@ def build_graph(agents: dict):
 
     def before_node(event):
         event.invocation_state["active_stage"] = event.node_id
+        repository = event.invocation_state["repository"]
+        if not event.cancel_node:
+            print(f"[{repository.case_id}] {event.node_id}: started", file=sys.stderr, flush=True)
 
     def after_node(event):
         repository = event.invocation_state["repository"]
@@ -240,6 +244,11 @@ def build_graph(agents: dict):
             repository,
         )
         _publish_stage_output(event.node_id, node, output, repository.output_dir)
+        print(
+            f"[{repository.case_id}] {event.node_id}: {output['status']}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     async def close_clients(_event):
         await close_model_clients(agent.model for agent in agents.values())
@@ -384,6 +393,11 @@ def run_workflow(
                 )
             except OSError:
                 logger.warning("Could not save the failed stage report", exc_info=True)
+            print(
+                f"[{repository.case_id}] {error_stage}: VERIFICATION_INCOMPLETE",
+                file=sys.stderr,
+                flush=True,
+            )
     final = stages.get(order[-1], {}) if order else {}
     status = final.get("status", "VERIFICATION_INCOMPLETE")
     evidence = repository.current_evidence()
