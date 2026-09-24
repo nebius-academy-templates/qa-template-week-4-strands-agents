@@ -32,18 +32,3 @@ If you already completed the review-route exercise, keep your edited
 freshness check. Apply the `AppiumTestCase.kt` capture update from step 4 and
 install the current Python requirements. This update does not include any case
 implementations; keep the tests and plans already in your practice project.
-
-## Maintainer checks
-
-From this repository root, with the runtime requirements installed in your
-Python environment:
-
-```shell
-python -m pip install pytest==8.4.1
-python -m pytest tests -q
-```
-
-These checks use synthetic credentials, mock HTTP responses, and temporary
-repositories. They do not call a model provider or require a running backend.
-They verify model selection and SDK protocol handling, not the quality of a
-model's generated tests or access to a live API.

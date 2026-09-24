@@ -367,7 +367,5 @@ and function calling; mobile review also needs image input.
 capabilities and is an example, not a required model. A model that requires
 Responses API for tool calls is incompatible with this adapter.
 
-Offline tests use synthetic credentials and a mock HTTP transport. They can
-check SDK request handling without a key, but cannot establish API access or
-model quality. A live run with your key is still needed to verify the selected
-model against a course case.
+A live run with your API key is needed to verify the selected model against a
+course case in your environment.
