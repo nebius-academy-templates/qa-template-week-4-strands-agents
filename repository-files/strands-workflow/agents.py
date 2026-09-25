@@ -109,10 +109,9 @@ def _section(document: str, heading: str) -> str:
 
 def make_agents(
     repository: Repository,
-    generation_model: Model,
-    repair_model: Model,
-    review_model: Model,
-    readiness_model: Model | None = None,
+    analysis_model: Model,
+    implementation_model: Model,
+    include_readiness: bool = True,
 ) -> dict[str, Agent]:
     """Bootstrap trusted local policy and give each role its own tool set."""
 
@@ -151,6 +150,14 @@ The host writes the stage reports from your structured result.
         skill_path = repository.root / ".agents" / "skills" / name / "SKILL.md"
         return AgentSkills(skills=[Skill.from_file(skill_path, strict=True)], strict=True)
 
+    def model_factory(name: str) -> Model:
+        return {
+            "readiness": analysis_model,
+            "review": analysis_model,
+            "generation": implementation_model,
+            "repair": implementation_model,
+        }[name]
+
     def agent(
         name: str,
         instructions: str,
@@ -158,14 +165,13 @@ The host writes the stage reports from your structured result.
         schema: type,
         skill: str = "",
         *,
-        model: Model,
         hooks: list | None = None,
         model_call_limit: int = 120,
     ) -> Agent:
         return Agent(
             name=name,
             agent_id=name,
-            model=model,
+            model=model_factory(name),
             system_prompt=common + "\n" + instructions,
             tools=tools,
             plugins=[skill_plugin(skill)] if skill else [],
@@ -255,7 +261,6 @@ concise plan, changes, result and evidence paths in Implementation.
             [*inspection, write_file, edit_file, run_mobile_test if mobile else run_api_test],
             Implementation,
             generation_skill,
-            model=generation_model,
             model_call_limit=60,
         ),
         "repair": agent(
@@ -284,7 +289,6 @@ from a stale, skipped, zero-test or failed run. Return the RepairOutcome schema.
             [*inspection, write_file, edit_file, run_repair_test, repair_action],
             RepairOutcome,
             "test-repair",
-            model=repair_model,
         ),
         "review": agent(
             "review",
@@ -320,10 +324,9 @@ Keep a passing execution result distinct from full conformance to the case.
             ReviewResult,
             hooks=[ReviewPacketInput()],
             model_call_limit=20,
-            model=review_model,
         ),
     }
-    if readiness_model is not None:
+    if include_readiness:
         agents["readiness"] = agent(
             "readiness",
             f"""Assess the selected case's requirements and automation capabilities using
@@ -342,6 +345,5 @@ substitute another case's test for the selected assignment in this assessment.
 """,
             sources,
             Assessment,
-            model=readiness_model,
         )
     return agents

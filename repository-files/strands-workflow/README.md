@@ -66,20 +66,22 @@ python3 -m venv .venv
 ```
 
 Set either `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in the current environment.
-Do not put a key in this repository. Select the matching provider and an
-available model for each role when running `main.py`: `--readiness-model`,
-`--generation-model`, `--repair-model`, and `--review-model`. Each option selects
-the model for that agent independently. The review model is used once the
-lesson's review route is connected.
+Do not put a key in this repository. Select the matching provider with
+`--provider`. `--model` selects the model for generation and repair;
+`--analysis-model` selects the model for readiness and review. If omitted,
+the analysis model defaults to `claude-sonnet-5` for Anthropic or `--model`
+for OpenAI. One provider is selected for the entire run. The review model is
+used once the lesson's review route is connected.
 Anthropic generation and repair use effort `high` and `max_tokens=32768`;
 readiness and review use effort `medium` and `max_tokens=16384`. The token limit
 applies to each model response, including thinking tokens when used, rather
 than the entire stage. These Anthropic settings do not change the OpenAI
 configuration.
 
-Roles with the same model ID and settings share a provider client. Each agent
+`model_factory(name)` in `make_agents()` assigns the analysis model to readiness
+and review, and the implementation model to generation and repair. Each agent
 keeps separate conversation state, tools and output schemas. A reused readiness
-decision skips construction of the readiness agent and its model. Reused
+decision skips construction of the readiness agent. Reused
 `BLOCKED` or `NEEDS_CLARIFICATION` decisions end the case without creating models.
 The host closes each distinct client once, including clients created before
 a setup failure.
@@ -200,8 +202,8 @@ Each invocation writes a batch report to
 results are stored under `cases/001-<case-id>/`, `cases/002-<case-id>/`, and so
 on. Each per-case report contains a terminal `next_action` computed from its
 final status, and the batch copies that action into the corresponding case
-entry. The batch report records the selected model ID for each of the four roles,
-including any role skipped during this run, and the selected readiness mode.
+entry. The batch report records the selected model IDs under `analysis` and
+`implementation`, and the selected readiness mode.
 Each per-case report records one of `model`,
 `model_reassessment`, `workbook_status`, or `prepared_preflight` as the
 readiness source. Reused and deterministic readiness also have a standalone
@@ -338,21 +340,17 @@ worksheets with their standard columns: `Case ID`, `Title`, `Description`,
   --case-file ..\test-cases\test-cases.xlsx `
   --case-id API-2010 MOB-1007 `
   --provider anthropic `
-  --readiness-model claude-sonnet-5 `
-  --generation-model claude-opus-5 `
-  --review-model claude-sonnet-5
+  --model claude-opus-5 `
+  --analysis-model claude-sonnet-5
 ```
 
 The readiness options are described under
 [How the application is assembled](#how-the-application-is-assembled).
-`--generation-model` is required; repair defaults to that model when
-`--repair-model` is omitted. Readiness and review default to `claude-sonnet-5`
-for Anthropic or the generation model for OpenAI. Use `--repair-model` when repair should use a different model.
-
-Existing commands remain supported: `--model` is an alias for
-`--generation-model`; `--analysis-model` supplies the readiness and review defaults.
-An explicit `--readiness-model` or `--review-model` overrides that legacy default
-for its role. Use the four role-specific flags in new commands.
+`--model` is required. Use `--analysis-model` to override the analysis default.
+When updating commands from the four-role CLI, replace `--generation-model`
+and `--repair-model` with one `--model` value, and `--readiness-model` and
+`--review-model` with one `--analysis-model` value. The four former flags are
+no longer accepted.
 
 On macOS or Linux, use `./.venv/bin/python`, forward slashes, and shell line
 continuations. Inspect the batch `result.json`, each per-case result and stage
@@ -360,3 +358,34 @@ file, and matching JUnit and Allure artifacts. If native OTLP tracing was
 enabled, use the trace backend for detailed chronology. Report source-only
 implementation decisions, verified execution, repair outcomes, and review findings as distinct
 results.
+
+### Use OpenAI
+
+Set `OPENAI_API_KEY` in the environment and select `--provider openai`.
+This run does not require `ANTHROPIC_API_KEY`. The existing `requirements.txt`
+includes the OpenAI adapter; no dependency change is needed. The application
+reads environment variables directly and does not load a `.env` file.
+
+From `strands-workflow/`, with the practice checkout as its parent:
+
+```powershell
+.\.venv\Scripts\python.exe main.py `
+  --repo .. `
+  --case-file ..\test-cases\test-cases.xlsx `
+  --case-id API-2010 `
+  --provider openai `
+  --model gpt-4.1
+```
+
+On macOS/Linux use `.venv/bin/python`, forward slashes, and `\` for line
+continuations. Omit `--analysis-model` to use the selected OpenAI model for
+both groups, or supply another OpenAI model ID for readiness and review.
+
+The pinned Strands adapter uses Chat Completions. Select a model with streaming
+and function calling; mobile review also needs image input.
+[GPT-4.1](https://developers.openai.com/api/docs/models/gpt-4.1) supports these
+capabilities and is an example, not a required model. A model that requires
+Responses API for tool calls is incompatible with this adapter.
+
+A live run with your API key is needed to verify the selected model against a
+course case in your environment.
