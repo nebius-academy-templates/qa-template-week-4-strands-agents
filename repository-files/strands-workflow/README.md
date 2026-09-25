@@ -208,30 +208,43 @@ Each per-case report records one of `model`,
 `model_reassessment`, `workbook_status`, or `prepared_preflight` as the
 readiness source. Reused and deterministic readiness also have a standalone
 `readiness.json`; they are recorded stages but are not counted as model graph
-execution. Cases that need clarification, have review findings or end with a
-classified repair outcome retain that result while the next independent case
-continues. `VERIFIED` also allows continuation but still requires review.
-Infrastructure errors, incomplete execution evidence, unhandled test failures,
-unknown outcomes and runtime errors stop the batch. Before starting each case,
-the batch reads the installed repair hook's queue. Unfinished work stops
-continuation; the batch does not change or release queue items.
+execution. Every selected case is attempted in order. A final
+`VERIFICATION_INCOMPLETE`, `INFRASTRUCTURE_ISSUE`, `FAILED`, unknown outcome,
+or case-level exception is recorded without stopping the remaining cases.
+`VERIFIED` also allows continuation but still requires review. A case setup or
+workflow exception produces a `FAILED` case report with error details and a traceback.
+
+Before each case, the runner inspects the installed repair queue. Unfinished
+work is recorded as `repair_queue_unfinished: true` in the batch's case entry;
+it does not stop the batch or modify, unlock, or complete queue items. The
+existing per-test repair hooks still enforce their guards. A pending or
+conflicting repair item may prevent that case's test from running; retain the
+reported missing evidence and resolve the queue before rerunning affected cases.
 
 After every case has been processed, `COMPLETED` means every result is `REVIEWED`
-or an explicitly allowed `ALREADY_IMPLEMENTED`. Other outcomes produce
+or an explicitly allowed `ALREADY_IMPLEMENTED`, with no case errors. Other outcomes produce
 `COMPLETED_WITH_ISSUES`, a list of `unresolved_case_ids`, and a nonzero CLI exit.
-`STOPPED` retains the remaining case IDs and the reason continuation was blocked.
+`STOPPED` is reserved for interruption or a runner-level failure, such as an
+unreadable shared repair queue, report persistence failure, telemetry failure,
+or a test process that could not be stopped. It retains the remaining case IDs
+and the reason continuation was blocked.
 Each case keeps a separate plan at
 `agent_docs/automation-plans/<case-id>.md`, so processing a later case does not
-replace an earlier case's plan. Reports from agent invocations contain the domain
-result plus duration, cycle count, model latency, token counts, cache counts when the
+replace an earlier case's plan. Plan writes are checked against the installed API or mobile template:
+section order, case ID, validation marker, unfilled template placeholders and size
+limits. A rejected write preserves the previous file and reports what to correct.
+These checks do not establish that the plan's claims match the case or contract.
+Reports from agent invocations contain the domain result plus duration, cycle count,
+model latency, token counts, cache counts when the
 provider reports them, and per-tool name, count, success, error, and total-time
 values. These metrics are selected directly from the Strands result; raw metric
 summaries, messages, tool arguments, and tool results are not serialized. The
 metrics are not added to the next agent's input. A graph status of `completed`
 means only that graph execution stopped normally. Reused workbook and prepared
 preflight readiness decisions have no model metrics because they invoke no model.
-The batch report is saved before and after each case. Setup, execution and cleanup
-errors retain the completed cases, remaining order and failure details.
+The batch report is saved before and after each case. Case setup and workflow
+exceptions are saved in that case's report and batch entry; processing continues.
+Runner-level errors retain the completed cases, remaining order and failure details.
 Exhausting a stage's model-call budget produces `VERIFICATION_INCOMPLETE` with
 `error_type: ModelCallLimitExceeded`, `error_code: MODEL_CALL_LIMIT`, the exact
 `error_stage`, and `model_call_limit` containing `calls` and `maximum`. Inspect

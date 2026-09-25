@@ -7,29 +7,18 @@ import asyncio
 import json
 import runpy
 import sys
+import traceback
 from pathlib import Path
 from uuid import uuid4
 
 from agents import ANALYSIS_SETTINGS, IMPLEMENTATION_SETTINGS, make_agents, make_model
 from case_loader import SUPPORTED_SUFFIXES, TEXT_SUFFIXES, CaseInput, read_cases
+from process_runner import ProcessCleanupError
 from repository import Repository
 from state import Assessment
 from telemetry import NativeTelemetry
 from workflow import close_model_clients, run_workflow
 from workspace import ensure_safe_path, validate_case_id
-
-CASE_OUTCOMES = frozenset(
-    {
-        "REVIEWED",
-        "VERIFIED",
-        "BLOCKED",
-        "NEEDS_CLARIFICATION",
-        "CHANGES_REQUESTED",
-        "PRODUCT_BUG",
-        "NEEDS_INVESTIGATION",
-        "EXHAUSTED",
-    }
-)
 
 
 def has_unfinished_repair(repository: Path) -> bool:
@@ -167,7 +156,9 @@ def run_cases(
             remaining_case_ids=case_ids[len(processed) :],
             stopped_after=processed[-1] if stopped and processed else None,
             unresolved_case_ids=[
-                result["case_id"] for result in case_results if result["status"] not in accepted
+                result["case_id"]
+                for result in case_results
+                if result["status"] not in accepted or result.get("error_type")
             ],
         )
         temporary = report_path.with_suffix(".tmp")
@@ -195,44 +186,70 @@ def run_cases(
         telemetry = NativeTelemetry(export=export_otel)
         for index, case in enumerate(cases, 1):
             phase = "repair_queue"
-            if has_unfinished_repair(repository):
-                stopped = True
-                report["stop_reason"] = "Resolve unfinished repair queue work before continuing."
-                break
+            unfinished_repair = has_unfinished_repair(repository)
             case_id = case.case_id
             report["active_case_id"] = case_id
             save_report()
             phase = "case_setup"
-            case_output = output_dir / "cases" / f"{index:03d}-{case_id}"
-            adapter = Repository(
-                repository, case_output, case_id, skip_implemented=skip_implemented
+            case_output = ensure_safe_path(
+                repository, output_dir / "cases" / f"{index:03d}-{case_id}"
             )
-            assessment, readiness_source = initial_readiness(
-                case, prepared_cases, reassess_readiness
-            )
-            agents = {}
-            if assessment is None or assessment.status == "READY":
-                analysis = implementation = None
-                try:
-                    analysis = make_model(provider, selected_analysis_model, ANALYSIS_SETTINGS)
-                    implementation = make_model(provider, model, IMPLEMENTATION_SETTINGS)
-                    agents = make_agents(
-                        adapter,
-                        analysis_model=analysis,
-                        implementation_model=implementation,
-                        include_readiness=assessment is None,
-                    )
-                except BaseException:
-                    asyncio.run(close_model_clients((analysis, implementation)))
-                    raise
-            phase = "workflow"
-            result = run_workflow(
-                case.text,
-                adapter,
-                agents,
-                initial_assessment=assessment,
-                readiness_source=readiness_source,
-            )
+            adapter = None
+            try:
+                adapter = Repository(
+                    repository, case_output, case_id, skip_implemented=skip_implemented
+                )
+                assessment, readiness_source = initial_readiness(
+                    case, prepared_cases, reassess_readiness
+                )
+                agents = {}
+                if assessment is None or assessment.status == "READY":
+                    analysis = implementation = None
+                    try:
+                        analysis = make_model(provider, selected_analysis_model, ANALYSIS_SETTINGS)
+                        implementation = make_model(provider, model, IMPLEMENTATION_SETTINGS)
+                        agents = make_agents(
+                            adapter,
+                            analysis_model=analysis,
+                            implementation_model=implementation,
+                            include_readiness=assessment is None,
+                        )
+                    except BaseException:
+                        asyncio.run(close_model_clients((analysis, implementation)))
+                        raise
+                phase = "workflow"
+                result = run_workflow(
+                    case.text,
+                    adapter,
+                    agents,
+                    initial_assessment=assessment,
+                    readiness_source=readiness_source,
+                )
+                if not isinstance(result.get("status"), str) or not isinstance(
+                    result.get("next_action"), str
+                ):
+                    raise ValueError("Case workflow returned no status or next action")
+            except ProcessCleanupError:
+                # Another case must not run while an owned process may still be writing.
+                raise
+            except Exception as error:
+                case_output.mkdir(parents=True, exist_ok=True)
+                (case_output / "error.log").write_text(traceback.format_exc(), encoding="utf-8")
+                result = {
+                    "case_id": case_id,
+                    "status": "FAILED",
+                    "error_type": type(error).__name__,
+                    "error_message": str(error),
+                    "error_stage": phase,
+                    "error_log": "error.log",
+                    "changed_files": sorted(getattr(adapter, "changed_files", [])),
+                    "next_action": (
+                        "Inspect the case error log, resolve the failure and rerun this case."
+                    ),
+                }
+                (case_output / "result.json").write_text(
+                    json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
             case_results.append(
                 {
                     "case_id": case_id,
@@ -240,11 +257,16 @@ def run_cases(
                     "next_action": result["next_action"],
                     "report": (case_output / "result.json").relative_to(output_dir).as_posix(),
                     "changed_files": result.get("changed_files", []),
+                    **{key: value for key, value in result.items() if key.startswith("error_")},
+                    **({"repair_queue_unfinished": True} if unfinished_repair else {}),
                 }
             )
-            if result.get("error_type") or result.get("status") not in CASE_OUTCOMES | accepted:
+            if result.get("evidence", {}).get("execution_stopped") is False:
                 stopped = True
-                report["stop_reason"] = result["next_action"]
+                report["stop_reason"] = (
+                    "A test process could not be stopped; "
+                    "restore the shared runtime before continuing."
+                )
             report["active_case_id"] = None
             save_report()
             if stopped:
