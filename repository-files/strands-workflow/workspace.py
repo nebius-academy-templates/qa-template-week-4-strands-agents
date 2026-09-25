@@ -329,8 +329,9 @@ class RepositoryWorkspace:
     def source_fingerprint(self) -> str:
         """Hash execution inputs, including untracked and binary source resources.
 
-        Agent-readable logs and reports are outputs, not execution inputs. This
-        inventory is independent of both Git tracking and agent read permissions.
+        Agent-readable logs, reports and case automation plans are outputs, not
+        execution inputs. Keep instructions and plan templates in this inventory.
+        It is independent of both Git tracking and agent read permissions.
         """
         roots = (
             f"{self.test_module}/src",
@@ -375,6 +376,8 @@ class RepositoryWorkspace:
             for child in directory.iterdir():
                 self.ensure_safe(child)
                 if child.is_relative_to(self.output_dir):
+                    continue
+                if child == self.root / "agent_docs" / "automation-plans":
                     continue
                 if child.is_dir():
                     if child.name not in {"build", ".gradle", "__pycache__", ".git"}:
