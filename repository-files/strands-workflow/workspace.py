@@ -290,11 +290,49 @@ class RepositoryWorkspace:
                 raise ValueError("existing automation plan belongs to another case")
         return file
 
+    def _validate_plan(self, content: str) -> None:
+        template_path = f"agent_docs/templates/automation_plan.{self.layer}.workflow.md.template"
+        template_file = self.path_for(template_path)
+        if not template_file.is_file():
+            raise ValueError(f"Install the required plan template: {template_path}")
+        template = template_file.read_text(encoding="utf-8-sig")
+
+        def headings(text):
+            return re.findall(r"^##[ \t]+(.+?)\s*$", text, re.MULTILINE)
+
+        expected = headings(template)
+        problems = []
+        if not expected or headings(content) != expected:
+            problems.append("keep these sections in order: " + ", ".join(expected))
+        if not re.search(rf"^# Automation plan: {re.escape(self.case_id)}\s*$", content, re.M):
+            problems.append(f"use the title '# Automation plan: {self.case_id}'")
+        if not re.search(r"^- Artifact status: `validated`\s*$", content, re.M):
+            problems.append("include '- Artifact status: `validated`' after validating the plan")
+        placeholders = set(re.findall(r"<[^<>\n]+>", template))
+        if any(value in content for value in placeholders):
+            problems.append("replace the template placeholders")
+        sections = re.split(r"^##[ \t]+.+?\s*$", content, flags=re.M)[1:]
+        if any(not section.strip() for section in sections):
+            problems.append("fill every required section")
+        limits = re.search(r"Maximum size: (\d+) non-empty lines and (\d+) words", template)
+        if limits and (
+            sum(bool(line.strip()) for line in content.splitlines()) > int(limits[1])
+            or len(content.split()) > int(limits[2])
+        ):
+            problems.append(f"stay within {limits[1]} non-empty lines and {limits[2]} words")
+        if problems:
+            raise ValueError(
+                f"Plan does not match {template_path}: {'; '.join(problems)}. "
+                "Read the complete template, correct the plan and retry; nothing was written."
+            )
+
     def _write(self, file: Path, content: str) -> dict:
         if not content.strip() or len(content.encode("utf-8")) > _MAX_WRITE_BYTES:
             raise ValueError("write must contain nonempty bounded text")
 
         relative = file.relative_to(self.root).as_posix()
+        if relative == f"agent_docs/automation-plans/{self.case_id}.md":
+            self._validate_plan(content)
         original = file.read_text(encoding="utf-8-sig") if file.exists() else ""
         self._original.setdefault(relative, original)
         file.parent.mkdir(parents=True, exist_ok=True)

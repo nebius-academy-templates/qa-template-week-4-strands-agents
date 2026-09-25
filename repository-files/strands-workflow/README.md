@@ -230,8 +230,12 @@ or a test process that could not be stopped. It retains the remaining case IDs
 and the reason continuation was blocked.
 Each case keeps a separate plan at
 `agent_docs/automation-plans/<case-id>.md`, so processing a later case does not
-replace an earlier case's plan. Reports from agent invocations contain the domain
-result plus duration, cycle count, model latency, token counts, cache counts when the
+replace an earlier case's plan. Plan writes are checked against the installed API or mobile template:
+section order, case ID, validation marker, unfilled template placeholders and size
+limits. A rejected write preserves the previous file and reports what to correct.
+These checks do not establish that the plan's claims match the case or contract.
+Reports from agent invocations contain the domain result plus duration, cycle count,
+model latency, token counts, cache counts when the
 provider reports them, and per-tool name, count, success, error, and total-time
 values. These metrics are selected directly from the Strands result; raw metric
 summaries, messages, tool arguments, and tool results are not serialized. The
