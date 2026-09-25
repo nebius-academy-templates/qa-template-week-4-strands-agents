@@ -605,6 +605,7 @@ class Repository(RepositoryWorkspace):
                         summary["runner_result"] = marker[0]
         except ProcessCleanupError as error:
             execution_stopped = False
+            summary["execution_stopped"] = False
             invalidate(f"{error}; POST and result restoration were skipped")
         except (OSError, ValueError, RuntimeError, ET.ParseError) as error:
             invalidate(str(error))
