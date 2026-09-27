@@ -71,7 +71,7 @@ Do not put a key in this repository. Select the matching provider with
 `--analysis-model` selects the model for readiness and review. If omitted,
 the analysis model defaults to `claude-sonnet-5` for Anthropic or `--model`
 for OpenAI. One provider is selected for the entire run. The review model is
-used once the lesson's review route is connected.
+used once the review route is connected.
 Anthropic generation and repair use effort `high` and `max_tokens=32768`;
 readiness and review use effort `medium` and `max_tokens=16384`. The token limit
 applies to each model response, including thinking tokens when used, rather
@@ -211,8 +211,10 @@ readiness source. Reused and deterministic readiness also have a standalone
 execution. Every selected case is attempted in order. A final
 `VERIFICATION_INCOMPLETE`, `INFRASTRUCTURE_ISSUE`, `FAILED`, unknown outcome,
 or case-level exception is recorded without stopping the remaining cases.
-`VERIFIED` also allows continuation but still requires review. A case setup or
-workflow exception produces a `FAILED` case report with error details and a traceback.
+`VERIFIED` also allows continuation but still requires review. Ordinary exceptions
+caught by the batch runner's per-case handler produce a `FAILED` case report with
+error details and a traceback. Errors handled inside the workflow retain its
+reported status, such as `VERIFICATION_INCOMPLETE`.
 
 Before each case, the runner inspects the installed repair queue. Unfinished
 work is recorded as `repair_queue_unfinished: true` in the batch's case entry;
@@ -278,8 +280,8 @@ Before creating provider models, the application saves the initial batch report
 and prints its path. It then prints a short message when each stage starts and
 its finalized status when the stage finishes. Interrupted stages report
 `VERIFICATION_INCOMPLETE`; inspect the saved error fields and `error.log` for
-details. After adding the review evidence check in lesson 4.5, a cancelled review
-has no `started` message because its agent did not run.
+details. Once the pre-review evidence check is added, a review cancelled by that
+check has no `started` message because the review agent did not run.
 
 ```text
 Batch report: /project/.agent-state/qa-workflow/<run-id>/result.json
@@ -331,8 +333,8 @@ native tracing is enabled.
 Connect the supplied `review` agent in `workflow.py`. A verified generation or
 verified repair may proceed to review. Immediately before review starts, read
 the current evidence again and cancel the node when it is missing or stale.
-Do not change agent prompts, repository tools, repair budgets, or evidence
-classification for this task. After the change, verified generation and repair
+Keep the existing agent prompts, repository tools, repair budgets, and evidence
+classification when connecting the review route. Verified generation and repair
 results must reach review with the prepared packet, while missing or stale
 evidence must keep review from running. A completed review with findings and no
 unverified claims or unresolved questions produces `CHANGES_REQUESTED`. An
@@ -343,8 +345,9 @@ incomplete comparison, unverified claim or unresolved question produces
 
 Use the completed graph with one or more assigned complete API or mobile cases. Start the
 backend and any required mobile services, set the provider key, and run from `strands-workflow/`. Supply case IDs
-in their required execution order. This example uses two workbook cases;
-replace the IDs and model with the assigned values. A `.md` or `.txt` case file
+in their required execution order. The first example runs the graph practice case,
+`API-2009`; replace the case ID and models when running another assignment.
+A `.md` or `.txt` case file
 can be used only when one case ID is supplied, and its content must explicitly
 include that ID. The workbook must contain the `Case Summary` and `Steps`
 worksheets with their standard columns: `Case ID`, `Title`, `Description`,
@@ -354,11 +357,15 @@ worksheets with their standard columns: `Case ID`, `Title`, `Description`,
 .\.venv\Scripts\python.exe main.py `
   --repo .. `
   --case-file ..\test-cases\test-cases.xlsx `
-  --case-id API-2010 MOB-1007 `
+  --case-id API-2009 `
   --provider anthropic `
   --model claude-opus-5 `
   --analysis-model claude-sonnet-5
 ```
+
+For the capstone batch, use `--case-id API-2010 MOB-1009` in the same command.
+The runner processes the API case first, then the mobile case. This batch also
+requires the mobile setup described under [Prerequisites](#prerequisites).
 
 The readiness options are described under
 [How the application is assembled](#how-the-application-is-assembled).
@@ -388,7 +395,7 @@ From `strands-workflow/`, with the practice checkout as its parent:
 .\.venv\Scripts\python.exe main.py `
   --repo .. `
   --case-file ..\test-cases\test-cases.xlsx `
-  --case-id API-2010 `
+  --case-id API-2009 `
   --provider openai `
   --model gpt-4.1
 ```
