@@ -228,6 +228,9 @@ or an explicitly allowed `ALREADY_IMPLEMENTED`, with no case errors. Other outco
 unreadable shared repair queue, report persistence failure, telemetry failure,
 or a test process that could not be stopped. It retains the remaining case IDs
 and the reason continuation was blocked.
+After process cleanup fails, the current case cannot launch further commands.
+Retrying a tool cannot clear the failure, and a later workflow error cannot
+prevent the batch from stopping.
 Each case keeps a separate plan at
 `agent_docs/automation-plans/<case-id>.md`, so processing a later case does not
 replace an earlier case's plan. Plan writes are checked against the installed API or mobile template:

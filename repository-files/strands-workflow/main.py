@@ -261,7 +261,10 @@ def run_cases(
                     **({"repair_queue_unfinished": True} if unfinished_repair else {}),
                 }
             )
-            if result.get("evidence", {}).get("execution_stopped") is False:
+            if (
+                getattr(adapter, "execution_stopped", True) is False
+                or result.get("evidence", {}).get("execution_stopped") is False
+            ):
                 stopped = True
                 report["stop_reason"] = (
                     "A test process could not be stopped; "
