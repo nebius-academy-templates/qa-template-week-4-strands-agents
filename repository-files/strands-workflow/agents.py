@@ -251,6 +251,11 @@ In this host, the skill's plan template is
 `agent_docs/templates/automation_plan.{layer}.workflow.md.template`, and its
 `automation_plan.md` working artifact is
 `agent_docs/automation-plans/{repository.case_id}.md`.
+Before creating or updating that plan, read the complete template. Preserve its
+section headings and order, fill its tables, replace every placeholder and keep
+its size limits. Validate its claims before marking it validated. A plan write
+that does not match the template is rejected without changing the file; correct
+the reported structure and retry before changing test code.
 After {run_tool_name}, return FAILED only when target_status is FAILED. Return
 VERIFICATION_INCOMPLETE when status is not VERIFIED for another reason. Do not start repair
 here. Return VERIFIED only when current execution_evidence has both status and

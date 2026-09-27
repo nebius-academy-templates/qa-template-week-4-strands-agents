@@ -50,10 +50,19 @@ class Repository(RepositoryWorkspace):
         super().__init__(root, output_dir, case_id)
         self.evidence_archive = ExecutionEvidence(self)
         self.last_run: dict | None = None
+        self.execution_stopped = True
         self.skip_implemented = skip_implemented
         self.initial_source_digest = self.source_fingerprint() if skip_implemented else None
 
     def current_evidence(self) -> dict:
+        if not self.execution_stopped:
+            return {
+                **deepcopy(self.last_run or {}),
+                "status": "VERIFICATION_INCOMPLETE",
+                "target_status": "VERIFICATION_INCOMPLETE",
+                "execution_stopped": False,
+                "reason": "A command process could not be stopped; restore the shared runtime.",
+            }
         if self.last_run is None:
             return {
                 "status": "VERIFICATION_INCOMPLETE",
@@ -88,7 +97,15 @@ class Repository(RepositoryWorkspace):
             for area, path in TEST_RESULT_DIRECTORIES.items()
         }
 
+    def _check_process_cleanup(self) -> None:
+        if not self.execution_stopped:
+            raise ProcessCleanupError(
+                "A previous command process could not be stopped; "
+                "restore the shared runtime before running another command."
+            )
+
     def _run(self, command: list[str], log: Path, input_text=None, timeout=900, env=None):
+        self._check_process_cleanup()
         # Windows resolves the executable before applying the child's cwd.
         # Resolve repository-local wrappers without changing the recorded command.
         executable = Path(command[0])
@@ -102,6 +119,10 @@ class Repository(RepositoryWorkspace):
                 timeout=timeout,
                 **({"env": env} if env is not None else {}),
             )
+        except ProcessCleanupError:
+            # Keep this failure for the whole case, even if a later tool call fails differently.
+            self.execution_stopped = False
+            raise
         except (OSError, subprocess.TimeoutExpired) as error:
             output = getattr(error, "stdout", "") or ""
             if isinstance(output, bytes):
@@ -448,6 +469,7 @@ class Repository(RepositoryWorkspace):
         return context
 
     def _run_test(self, target: str, *, format_sources: bool = True, repair: bool = False) -> dict:
+        self._check_process_cleanup()
         selected_test = self._selected_test(target)
         folder = self.output_dir / ("run-" + uuid.uuid4().hex)
         folder.mkdir()
@@ -486,7 +508,6 @@ class Repository(RepositoryWorkspace):
             summary["reasons"].append(reason)
 
         approved = False
-        execution_stopped = True
         executed_source_digest = None
         run = subprocess.CompletedProcess(command, 127, "Execution did not start")
         try:
@@ -604,12 +625,13 @@ class Repository(RepositoryWorkspace):
                     else:
                         summary["runner_result"] = marker[0]
         except ProcessCleanupError as error:
-            execution_stopped = False
+            self.execution_stopped = False
+            summary["execution_stopped"] = False
             invalidate(f"{error}; POST and result restoration were skipped")
         except (OSError, ValueError, RuntimeError, ET.ParseError) as error:
             invalidate(str(error))
         finally:
-            if approved and execution_stopped:
+            if approved and self.execution_stopped:
                 try:
                     summary["post_hook"] = self._hook(
                         "after", command_text, folder, run.stdout, run.returncode
@@ -618,8 +640,9 @@ class Repository(RepositoryWorkspace):
                     invalidate(str(error))
                 finally:
                     try:
-                        self._restore_previous_results(folder, target)
-                        if self.layer == "mobile" and not repair:
+                        if self.execution_stopped:
+                            self._restore_previous_results(folder, target)
+                        if self.execution_stopped and self.layer == "mobile" and not repair:
                             # The runner refreshes while older results are archived.
                             # Restore its complete input before refreshing again.
                             refreshed = self._run(
@@ -631,6 +654,8 @@ class Repository(RepositoryWorkspace):
                                 invalidate("Repair queue refresh failed after result restoration")
                     except (OSError, ValueError) as error:
                         invalidate(f"Could not restore previous results: {error}")
+        if not self.execution_stopped:
+            summary["execution_stopped"] = False
         current_source_digest = self.source_fingerprint()
         if executed_source_digest is not None and executed_source_digest != current_source_digest:
             invalidate("Sources changed during or after execution")
